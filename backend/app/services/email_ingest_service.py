@@ -13,6 +13,7 @@ import imaplib
 import re
 import time
 from email.message import Message as EmailMessage
+from functools import partial
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -292,7 +293,8 @@ async def sync_source(db: AsyncSession, src) -> dict:
     account = await _resolve_account(db, src)
     try:
         messages, max_uid, validity = await asyncio.wait_for(
-            asyncio.to_thread(_fetch_messages, src, 500, account), timeout=60
+            asyncio.to_thread(partial(_fetch_messages, src, first_run_cap=500, account=account)),
+            timeout=60,
         )
     except Exception as e:  # noqa: BLE001
         src.status = "error"

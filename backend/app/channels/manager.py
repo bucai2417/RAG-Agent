@@ -8,6 +8,7 @@ import asyncio
 
 from app.channels.base import InboundMessage
 from app.channels.registry import build_adapter
+from app.core.errors import ValidationError
 from app.core.logging import get_logger
 
 logger = get_logger("channel")
@@ -39,6 +40,11 @@ class ChannelManager:
     async def _run_channel(self, channel_id: int, kind: str, config: dict) -> None:
         try:
             adapter = build_adapter(kind, config=config, on_message=lambda m: self._on_message(channel_id, m))
+        except ValidationError as e:
+            # 配置缺失（未填 bot_id/secret 等）属于预期内的用户状态，不打 traceback
+            logger.warning("channel_build_failed", channel_id=channel_id, kind=kind, err=str(e)[:300])
+            await self._set_status(channel_id, connected=False, error=str(e)[:300])
+            return
         except Exception as e:  # noqa: BLE001
             logger.exception("channel_build_failed", channel_id=channel_id, kind=kind)
             await self._set_status(channel_id, connected=False, error=str(e)[:300])

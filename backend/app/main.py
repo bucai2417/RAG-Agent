@@ -154,6 +154,11 @@ async def lifespan(app: FastAPI):
         periodic_email_poll(settings.email_poll_interval_seconds)
     )
 
+    # Webhook 回调重试：扫描到期的待投递记录并按退避重发
+    from app.tasks.callback_tasks import periodic_callback_flush
+
+    callback_task = asyncio.create_task(periodic_callback_flush(15))
+
     # 个人邮箱账号轮询（收件箱）
     from app.tasks.mail_tasks import periodic_mail_poll
 
@@ -198,12 +203,30 @@ async def lifespan(app: FastAPI):
         vector=settings.resolved_vector_backend,
         tasks=settings.task_backend,
     )
+
+    # 打印访问地址（放在启动日志末尾，最醒目）
+    try:
+        from app.core.netutil import access_urls, resolve_bind
+
+        _host, _port = resolve_bind(settings.port)
+        for u in access_urls(_host, _port):
+            logger.info(
+                "server_access_url",
+                scope=u["scope"],
+                url=u["url"],
+                **({"note": u["note"]} if u.get("note") else {}),
+            )
+        logger.info("server_bind", host=_host, port=_port)
+    except Exception:  # noqa: BLE001
+        logger.exception("access_url_log_failed")
+
     yield
     cleanup_task.cancel()
     scheduler_task.cancel()
     health_task.cancel()
     log_task.cancel()
     email_task.cancel()
+    callback_task.cancel()
     mail_task.cancel()
     sla_task.cancel()
     reminder_task.cancel()
