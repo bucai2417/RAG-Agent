@@ -608,7 +608,10 @@ export interface ChannelItem {
   service_mode?: 'qa' | 'support'
   default_lang?: string | null
   default_agent_id?: number | null
-  reply_mode: 'rag' | 'smart' | 'agent'
+  reply_mode: 'rag' | 'smart' | 'agent' | 'workflow'
+  progress_hint?: boolean
+  group_progress_mode?: 'off' | 'first' | 'throttle'
+  group_progress_interval?: number
   command_prefix: string
   greeting?: string | null
   attach_ingest?: 'off' | 'bound' | 'all'
@@ -998,6 +1001,60 @@ export interface SkillScriptEntry {
   runtime?: string
 }
 
+// ---- 技能市场 ----
+export interface MarketInstalledRef {
+  skill_id: number | null
+  name: string
+  version?: string | null
+  subpath?: string
+}
+
+export interface MarketCandidate {
+  repo: string
+  name: string
+  description: string
+  stars: number
+  html_url: string
+  sub_skills: string[]
+  source: 'curated' | 'github'
+  installed: MarketInstalledRef | null
+}
+
+export interface MarketSearchResult {
+  candidates: MarketCandidate[]
+  mapped_terms: string[]
+  error: string | null
+  note: string | null
+}
+
+export interface MarketDetail {
+  repo: string
+  subpath: string
+  name: string
+  description: string
+  version?: string | null
+  body_md: string
+  files: { path: string; size: number }[]
+  entry_scripts: SkillScriptEntry[]
+  html_url: string
+  limitations: string[]
+}
+
+export const skillMarketApi = {
+  search: (q: string, limit = 20) =>
+    http.get<MarketSearchResult>('/skills/market/search', { params: { q, limit } }).then((r) => r.data),
+  detail: (repo: string, subpath = '') =>
+    http.get<MarketDetail>('/skills/market/detail', { params: { repo, subpath } }).then((r) => r.data),
+  install: (repo: string, subpath?: string, upgradeSkillId?: number) =>
+    http.post<SkillImportResult>('/skills/market/install', {
+      repo,
+      subpath: subpath || null,
+      upgrade_skill_id: upgradeSkillId ?? null,
+    }).then((r) => r.data),
+  installCollection: (repo: string) =>
+    http.post<SkillImportResult>('/skills/market/install-collection', { repo }).then((r) => r.data),
+}
+
 export const toolApi = {
   list: () => http.get<ToolItem[]>('/tools').then((r) => r.data),
   adminList: () => http.get<{ name: string; description: string; permission: string; kind: string }[]>('/tools/admin-list').then((r) => r.data),
@@ -1092,10 +1149,158 @@ export const workflowApi = {
   publish: (agentId: number) => http.post(`/agents/${agentId}/workflow/publish`).then((r) => r.data),
   run: (agentId: number, inputs: Record<string, any>) => http.post(`/agents/${agentId}/workflow/run`, { inputs }).then((r) => r.data),
   getRun: (runId: number) => http.get(`/workflow-runs/${runId}`).then((r) => r.data),
-  listRuns: (agentId: number, limit = 20) => http.get<{ runs: any[] }>(`/agents/${agentId}/workflow/runs`, { params: { limit } }).then((r) => r.data),
+  listRuns: (agentId: number, limit = 20, status?: string) =>
+    http.get<{ runs: any[]; status_counts: Record<string, number> }>(
+      `/agents/${agentId}/workflow/runs`, { params: { limit, status: status || undefined } },
+    ).then((r) => r.data),
   approveUrl: (runId: number) => `${API_BASE}/workflow-runs/${runId}/approve`,
   pendingApprovals: () =>
     http.get<{ run_id: number; agent_id: number; agent_name: string; pending_node_id?: string | null; input?: any; created_at?: string }[]>('/approvals/pending').then((r) => r.data),
+  generate: (agentId: number, prompt: string, modelConfigId?: number) =>
+    http.post<WorkflowGenerateResult>(`/agents/${agentId}/workflow/generate`, {
+      prompt,
+      model_config_id: modelConfigId ?? null,
+    }).then((r) => r.data),
+  nodeTypes: () =>
+    http.get<{ types: string[]; specs: Record<string, string>; extra: Record<string, any> }>('/workflow/node-types').then((r) => r.data),
+  resend: (runId: number) =>
+    http.post<{ ok: boolean; message: string }>(`/workflow-runs/${runId}/resend`).then((r) => r.data),
+  debug: (agentId: number, message: string, history: { role: string; content: string }[] = [], modelConfigId?: number) =>
+    http.post<WorkflowDebugResult>(`/agents/${agentId}/workflow/debug`, {
+      message,
+      history,
+      model_config_id: modelConfigId ?? null,
+    }).then((r) => r.data),
+
+  // ---- 外部接入 ----
+  listHooks: (agentId?: number) =>
+    http.get<any[]>('/workflow-hooks', { params: agentId ? { agent_id: agentId } : {} }).then((r) => r.data),
+  createHook: (agentId: number, path?: string, opts?: { name?: string; rateLimit?: number; callbackUrl?: string }) =>
+    http.post<{
+      id: number; token: string; hook_url: string; path?: string | null
+      rate_limit_per_min: number; callback_url?: string | null
+    }>('/workflow-hooks', {
+      agent_id: agentId,
+      path: path || null,
+      name: opts?.name || '默认',
+      rate_limit_per_min: opts?.rateLimit ?? 60,
+      callback_url: opts?.callbackUrl || null,
+    }).then((r) => r.data),
+  toggleHook: (id: number, enabled: boolean) =>
+    http.post<{ enabled: boolean }>(`/workflow-hooks/${id}/toggle`, null, { params: { enabled } }).then((r) => r.data),
+  removeHook: (id: number) => http.delete(`/workflow-hooks/${id}`).then((r) => r.data),
+
+  // ---- 测试用例 ----
+  listCases: (agentId: number) =>
+    http.get<any[]>(`/agents/${agentId}/workflow/cases`).then((r) => r.data),
+  createCase: (agentId: number, data: { name: string; input: any; expected?: string | null; assert_contains?: boolean }) =>
+    http.post(`/agents/${agentId}/workflow/cases`, data).then((r) => r.data),
+  updateCase: (caseId: number, data: Record<string, any>) =>
+    http.patch(`/workflow-cases/${caseId}`, data).then((r) => r.data),
+  removeCase: (caseId: number) => http.delete(`/workflow-cases/${caseId}`).then((r) => r.data),
+  runCases: (agentId: number, caseIds?: number[]) =>
+    http.post<{ total: number; passed: number; failed: number; results: any[] }>(
+      `/agents/${agentId}/workflow/cases/run`, { case_ids: caseIds || null },
+    ).then((r) => r.data),
+
+  // ---- 取消 / 版本 / 导入导出 ----
+  cancelRun: (runId: number) =>
+    http.post<{ ok: boolean; signalled: boolean; message: string }>(
+      `/workflow-runs/${runId}/cancel`,
+    ).then((r) => r.data),
+  listVersions: (agentId: number) =>
+    http.get<{ id: number; version: number; note?: string | null; node_count: number; edge_count: number; created_at?: string }[]>(
+      `/agents/${agentId}/workflow/versions`,
+    ).then((r) => r.data),
+  rollbackVersion: (agentId: number, versionId: number) =>
+    http.post<{ message: string; version: number }>(
+      `/agents/${agentId}/workflow/versions/${versionId}/rollback`,
+    ).then((r) => r.data),
+  exportWorkflow: (agentId: number) =>
+    http.get<any>(`/agents/${agentId}/workflow/export`).then((r) => r.data),
+  importWorkflow: (data: any) =>
+    http.post<{ message: string; agent_id: number; workflow_id: number; node_count: number }>(
+      '/workflow/import', data,
+    ).then((r) => r.data),
+  usage: (agentId: number, days = 30) =>
+    http.get<{
+      days: number
+      total: { prompt_tokens: number; completion_tokens: number; calls: number; runs: number }
+      series: { date: string; prompt_tokens: number; completion_tokens: number; calls: number; runs: number }[]
+    }>(`/agents/${agentId}/workflow/usage`, { params: { days } }).then((r) => r.data),
+
+  // ---- 模板 ----
+  listTemplates: () =>
+    http.get<{ builtin: WorkflowTemplateItem[]; user: WorkflowTemplateItem[]; public: WorkflowTemplateItem[] }>(
+      '/workflow/templates',
+    ).then((r) => r.data),
+  saveAsTemplate: (agentId: number, data: { name?: string; category?: string; description?: string; include_cases?: boolean }) =>
+    http.post<{ id: number; name: string; node_count: number; case_count: number }>(
+      `/agents/${agentId}/workflow/save-as-template`, data,
+    ).then((r) => r.data),
+  publishTemplate: (id: number, isPublic = true) =>
+    http.post<{
+      visibility: string; review_status: string; risk_level?: string
+      blocked?: boolean; message?: string
+    }>(`/workflow/templates/${id}/publish`, null, { params: { public: isPublic } }).then((r) => r.data),
+  listPendingReviews: () =>
+    http.get<any[]>('/workflow/templates/pending').then((r) => r.data),
+  reviewTemplate: (id: number, approve: boolean, note?: string) =>
+    http.post<{ review_status: string; visibility: string; message: string }>(
+      `/workflow/templates/${id}/review`, { approve, note: note || null },
+    ).then((r) => r.data),
+  rateTemplate: (id: number, rating: number, comment?: string) =>
+    http.post<{ rating: number; rating_count: number; my_rating: number }>(
+      `/workflow/templates/${id}/rate`, { rating, comment: comment || null },
+    ).then((r) => r.data),
+  deleteTemplate: (id: number) => http.delete(`/workflow/templates/${id}`).then((r) => r.data),
+  applyTemplate: (data: { key?: string; template_id?: number; name?: string }) =>
+    http.post<{ agent_id: number; workflow_id: number; name: string; node_count: number; case_count: number }>(
+      '/workflow/templates/apply', data,
+    ).then((r) => r.data),
+}
+
+export interface WorkflowTemplateItem {
+  id?: number
+  key?: string
+  name: string
+  category: string
+  description: string
+  tags: string[]
+  node_count: number
+  case_count: number
+  source: 'builtin' | 'user' | 'public'
+  visibility?: 'private' | 'pending' | 'public'
+  apply_count?: number
+  risk_level?: 'none' | 'low' | 'medium' | 'high'
+  review_status?: 'none' | 'pending' | 'approved' | 'rejected'
+  rating?: number | null
+  rating_count?: number
+  risk_findings?: { node_id: string; node_type: string; level: string; reason: string; hint: string }[]
+}
+
+export interface WorkflowDebugResult {
+  text: string
+  error: string | null
+  paused: { node_id: string; title?: string } | null
+  trace: {
+    node_id: string
+    status: string
+    latency_ms?: number
+    input?: any
+    output?: any
+    error?: string
+  }[]
+  latency_ms: number
+  final: any
+}
+
+export interface WorkflowGenerateResult {
+  graph: { nodes: any[]; edges: any[]; name?: string; description?: string }
+  warnings: string[]
+  name: string
+  description: string
+  node_count: number
 }
 export async function streamWorkflowRun(
   agentId: number,
