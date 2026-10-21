@@ -408,13 +408,9 @@ async def run_agent(
                     yield f"event: error\ndata: {json.dumps({'message': '工作流未配置'}, ensure_ascii=False)}\n\n"
                     return
                 # 输入：把 query 填进工作流声明的第一个输入名（默认 query）
-                start_node = next((n for n in wf.graph.get("nodes", []) if n.get("type") == "start"), None)
-                in_name = "query"
-                if start_node:
-                    ins = (start_node.get("data") or {}).get("inputs") or []
-                    if ins:
-                        in_name = ins[0].get("name") or "query"
-                inputs = {in_name: query}
+                from app.agents.workflow.runner import start_input_name
+
+                inputs = {start_input_name(wf.graph): query}
 
                 run = WorkflowRun(
                     tenant_id=user.tenant_id, workflow_id=wf.id, agent_id=agent_id,

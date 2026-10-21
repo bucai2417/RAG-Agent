@@ -1126,6 +1126,67 @@ class PublishWorkflowTool(WriteToolMixin):
         return ToolResult(content=f"已发布工作流 #{wf.id}（v{wf.version}）")
 
 
+# ==================== 工作流：AI 生成 ====================
+class GenerateWorkflowTool(WriteToolMixin):
+    """自然语言 → 工作流图（不落库，返回图供确认/保存）。"""
+
+    name = "generate_workflow"
+    description = (
+        "根据自然语言需求生成一个工作流 DAG（不落库）。返回可执行的 graph JSON，"
+        "用户确认后用 save_workflow 保存。适合『帮我做一个订单自动处理流程』这类需求。"
+        "生成的是骨架，外部接口 URL 需用户补充。"
+    )
+    required_permission = "workflow:edit"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string", "description": "需求描述，越具体越好：输入、处理步骤、输出"},
+            "agent_id": {"type": "integer", "description": "可选：目标智能体 id，用于继承其默认模型"},
+        },
+        "required": ["prompt"],
+    }
+
+    def summarize(self, args: dict) -> str:
+        return f"AI 生成工作流：{str(args.get('prompt') or '')[:40]}"
+
+    async def execute(self, args: dict, ctx: ToolContext) -> ToolResult:
+        from app.services.workflow_ai_service import generate_graph_from_text
+
+        prompt = str(args.get("prompt") or "").strip()
+        if not prompt:
+            return ToolResult(content="请描述工作流需求", is_error=True)
+
+        model_id = None
+        aid = args.get("agent_id")
+        if aid:
+            from app.models import Agent
+
+            a = await ctx.db.get(Agent, int(aid))
+            if not a or a.tenant_id != ctx.tenant_id:
+                return ToolResult(content="智能体不存在", is_error=True)
+            model_id = a.model_config_id
+
+        try:
+            r = await generate_graph_from_text(
+                ctx.db, tenant_id=ctx.tenant_id, prompt=prompt, model_config_id=model_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(content=f"生成失败：{str(e)[:300]}", is_error=True)
+
+        g = r["graph"]
+        lines = [
+            f"已生成工作流「{r['name']}」：{r['node_count']} 个节点",
+            "节点：" + ", ".join(f"{n['id']}({n['type']})" for n in g["nodes"]),
+        ]
+        if r["warnings"]:
+            lines.append("自动修正：" + "；".join(r["warnings"][:5]))
+        lines.append("确认后调用 save_workflow(agent_id, graph) 保存。")
+        return ToolResult(
+            content="\n".join(lines),
+            data={"graph": g, "warnings": r["warnings"], "name": r["name"]},
+        )
+
+
 # ==================== 文档分块（chunk）编辑 ====================
 class ManageDocChunkTool(WriteToolMixin):
     name = "manage_doc_chunk"
@@ -2298,7 +2359,7 @@ OPS_TOOLS2 = [
     ManageDocAclTool(), DeleteFolderTool(),
     UpdateChannelTool(), TestChannelTool(),
     ManageRoleTool(), RevokeUserRoleTool(), ManageDeptTool(), ManageGroupTool(),
-    ManageWebhookTokenTool(), PublishWorkflowTool(),
+    ManageWebhookTokenTool(), PublishWorkflowTool(), GenerateWorkflowTool(),
     ManageMcpServerTool(),
     ManageNotifyChannelTool(),
     ManageDocChunkTool(), ManageFilesTool(), RunSkillScriptTool(), TestProviderTool(),

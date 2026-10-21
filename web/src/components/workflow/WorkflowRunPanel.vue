@@ -7,6 +7,20 @@
     @update:model-value="(v: any) => emit('update:modelValue', v)"
   >
     <el-tabs v-model="tab" @tab-change="onTab">
+      <!-- 调试对话 -->
+      <el-tab-pane label="调试对话" name="chat">
+        <p class="rp-hint">
+          像客户一样对话，实时看到工作流走到哪一步。调试不写入运行历史。
+        </p>
+        <div class="rp-chat-wrap">
+          <WorkflowDebugChat
+            :send="debugSend"
+            :busy="debugBusy"
+            :reset-key="debugResetKey"
+          />
+        </div>
+      </el-tab-pane>
+
       <!-- 运行 -->
       <el-tab-pane label="运行" name="run">
         <div v-if="inputDefs.length" class="rp-form">
@@ -21,6 +35,15 @@
         <el-alert v-else type="info" show-icon :closable="false" title="该工作流未声明输入（start 节点无 inputs），可直接运行。" style="margin-bottom: 12px" />
 
         <el-button type="primary" :icon="VideoPlay" :loading="running" :disabled="!!pending" @click="run">运行</el-button>
+        <el-button
+          v-if="running && currentRunId"
+          type="danger"
+          plain
+          :icon="VideoPause"
+          :loading="cancelling"
+          @click="cancelRun"
+        >停止</el-button>
+        <span v-if="timeoutHint" class="rp-timeout-hint">{{ timeoutHint }}</span>
 
         <el-alert
           v-if="pending"
@@ -86,6 +109,14 @@
 
       <!-- 历史 -->
       <el-tab-pane label="历史" name="history">
+        <div class="rp-history-bar">
+          <el-radio-group v-model="histFilter" size="small" @change="loadHistory">
+            <el-radio-button value="">全部</el-radio-button>
+            <el-radio-button value="failed">失败<span v-if="counts.failed" class="rp-count">{{ counts.failed }}</span></el-radio-button>
+            <el-radio-button value="waiting">待审批<span v-if="counts.waiting" class="rp-count">{{ counts.waiting }}</span></el-radio-button>
+            <el-radio-button value="success">成功<span v-if="counts.success" class="rp-count">{{ counts.success }}</span></el-radio-button>
+          </el-radio-group>
+        </div>
         <el-table :data="history" size="small" v-loading="histLoading" empty-text="暂无运行记录">
           <el-table-column label="时间" width="160">
             <template #default="{ row }">{{ row.created_at ? new Date(row.created_at).toLocaleString('zh-CN') : '-' }}</template>
@@ -97,6 +128,24 @@
           </el-table-column>
           <el-table-column label="耗时" width="80">
             <template #default="{ row }">{{ row.latency_ms ? `${row.latency_ms}ms` : '-' }}</template>
+          </el-table-column>
+          <el-table-column label="渠道回推" width="130">
+            <template #default="{ row }">
+              <!-- channel_reply 由后端在审批结束/回推后写入 run.output -->
+              <template v-if="row.channel_reply">
+                <el-tag size="small" :type="row.channel_reply.sent ? 'success' : 'danger'">
+                  {{ row.channel_reply.sent ? '已送达' : '未送达' }}
+                </el-tag>
+                <el-button
+                  v-if="!row.channel_reply.sent"
+                  size="small"
+                  link
+                  :loading="resending === row.id"
+                  @click="resend(row.id)"
+                >重发</el-button>
+              </template>
+              <span v-else class="rf-muted">-</span>
+            </template>
           </el-table-column>
           <el-table-column label="操作" width="80">
             <template #default="{ row }"><el-button size="small" link @click="openHistoryRun(row.id)">查看</el-button></template>
@@ -111,10 +160,11 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
-  VideoPlay, Check, Close, Loading, CircleCheck, CircleClose, Remove, Minus,
+  VideoPlay, VideoPause, Check, Close, Loading, CircleCheck, CircleClose, Remove, Minus,
 } from '@element-plus/icons-vue'
 import MarkdownBody from '@/components/MarkdownBody.vue'
 import AttachmentView from '@/components/AttachmentView.vue'
+import WorkflowDebugChat from './WorkflowDebugChat.vue'
 import { workflowApi, streamWorkflowRun, API_BASE } from '@/api'
 import { errMsg } from '@/api/http'
 import { NODE_META, type NodeMeta } from './meta'
@@ -131,7 +181,13 @@ interface NodeLog {
 interface InputDef { name: string; type?: string; required?: boolean; default?: any }
 
 const props = defineProps<{ agentId: number; graph: any; modelValue: boolean }>()
-const emit = defineEmits<{ 'update:modelValue': [boolean]; nodeStatus: [Record<string, string>]; finish: [] }>()
+const emit = defineEmits<{
+  'update:modelValue': [boolean]
+  nodeStatus: [Record<string, string>]
+  /** 执行路径给画布做高亮：{ takenEdges, latency } */
+  trace: [{ takenEdges: string[]; latency: Record<string, number> }]
+  finish: []
+}>()
 
 const tab = ref('run')
 const running = ref(false)
@@ -142,7 +198,71 @@ const result = ref<any>(null)
 const pending = ref<{ run_id: number; node_id: string; title?: string; content?: string } | null>(null)
 const history = ref<any[]>([])
 const histLoading = ref(false)
+const histFilter = ref('')
+const counts = ref<Record<string, number>>({})
+const resending = ref<number | null>(null)
+const cancelling = ref(false)
+/** 当前运行的 run_id（从 meta 事件拿到，用于「停止」） */
+const currentRunId = ref<number | null>(null)
+const timeoutHint = ref('')
+/** 执行路径高亮：已走过的边 + 节点耗时（供画布实时演示） */
+const takenEdges = ref<string[]>([])
+const latencyMap = ref<Record<string, number>>({})
 const vals = reactive<Record<string, any>>({})
+
+// ---- 调试对话 ----
+const debugBusy = ref(false)
+const debugResetKey = ref(0)
+const debugTurns = ref<{ role: string; content: string }[]>([])
+
+async function debugSend(text: string): Promise<{ text: string; meta?: string }> {
+  debugBusy.value = true
+  // 先把本轮用户消息纳入历史（服务端只收此前的对话）
+  const history = [...debugTurns.value]
+  debugTurns.value = [...debugTurns.value, { role: 'user', content: text }]
+  reset()
+  try {
+    const r = await workflowApi.debug(props.agentId, text, history)
+    // 用 trace 驱动画布上的路径高亮
+    applyTrace(r.trace || [])
+    debugTurns.value = [...debugTurns.value, { role: 'assistant', content: r.text || '（无回复）' }]
+    const metaParts: string[] = []
+    if (r.latency_ms != null) metaParts.push(`${r.latency_ms}ms`)
+    if (r.trace?.length) metaParts.push(`${r.trace.length} 个节点`)
+    if (r.paused) metaParts.push('停在审批')
+    return { text: r.text || '（无回复）', meta: metaParts.join(' · ') }
+  } finally {
+    debugBusy.value = false
+  }
+}
+
+/** 把调试返回的执行轨迹映射成画布状态 + 已走路径 */
+function applyTrace(trace: any[]) {
+  const sm: Record<string, string> = {}
+  const lat: Record<string, number> = {}
+  for (const t of trace) {
+    if (!t.node_id) continue
+    sm[t.node_id] = t.status || 'success'
+    if (t.latency_ms) lat[t.node_id] = t.latency_ms
+  }
+  statusMap.value = { ...sm }
+  latencyMap.value = { ...lat }
+  takenEdges.value = reconstructPath(props.graph, sm)
+  emit('nodeStatus', { ...sm })
+}
+
+/**
+ * 从已成功节点集合反推走过的边。
+ * 条件/多路/路由节点只走命中的分支，这里按「目标节点也成功」来判断。
+ */
+function reconstructPath(graph: any, ok: Record<string, string>): string[] {
+  const out: string[] = []
+  for (const e of graph?.edges || []) {
+    const id = e.id || `e-${e.source}-${e.target}`
+    if (ok[e.source] === 'success' && ok[e.target] === 'success') out.push(id)
+  }
+  return out
+}
 
 const inputDefs = computed<InputDef[]>(() => {
   const start = (props.graph?.nodes || []).find((n: any) => n.type === 'start')
@@ -179,13 +299,22 @@ function statusIcon(s?: string) {
   return Remove
 }
 
+function emitTrace() {
+  emit('trace', { takenEdges: [...takenEdges.value], latency: { ...latencyMap.value } })
+}
+
 function reset() {
   for (const k of Object.keys(logs)) delete logs[k]
   order.value = []
   statusMap.value = {}
   result.value = null
   pending.value = null
+  takenEdges.value = []
+  latencyMap.value = {}
+  currentRunId.value = null
+  timeoutHint.value = ''
   emit('nodeStatus', {})
+  emitTrace()
 }
 
 function upsert(nid: string, patch: Partial<NodeLog>) {
@@ -198,14 +327,26 @@ function upsert(nid: string, patch: Partial<NodeLog>) {
 }
 
 function handleEvent(event: string, d: any) {
-  if (event === 'node_started') upsert(d.node_id, { node_type: d.node_type, status: 'running' })
-  else if (event === 'node_finished') upsert(d.node_id, { node_type: d.node_type, status: d.status, latency_ms: d.latency_ms, input: d.input, output: d.output, error: d.error })
-  else if (event === 'approval_required') {
+  if (event === 'meta') {
+    // 运行开始时后端推送 run_id，供「停止」按钮使用
+    if (d?.run_id) currentRunId.value = d.run_id
+  } else if (event === 'node_started') upsert(d.node_id, { node_type: d.node_type, status: 'running' })
+  else if (event === 'node_finished') {
+    upsert(d.node_id, { node_type: d.node_type, status: d.status, latency_ms: d.latency_ms, input: d.input, output: d.output, error: d.error })
+    if (d.latency_ms != null) latencyMap.value = { ...latencyMap.value, [d.node_id]: d.latency_ms }
+    // 实时刷新已走路径
+    takenEdges.value = reconstructPath(props.graph, { ...statusMap.value })
+    emitTrace()
+  } else if (event === 'approval_required') {
     pending.value = { run_id: d.run_id, node_id: d.node_id, title: d.title, content: d.content }
     running.value = false
+  } else if (event === 'run_timeout') {
+    timeoutHint.value = `已超时（${d.timeout_seconds}s），已自动中止`
   } else if (event === 'run_finished') {
     result.value = d
     running.value = false
+    takenEdges.value = reconstructPath(props.graph, { ...statusMap.value })
+    emitTrace()
     if (d.status !== 'waiting') emit('finish')
   }
 }
@@ -277,11 +418,42 @@ async function approve(decision: 'approve' | 'reject') {
 async function loadHistory() {
   histLoading.value = true
   try {
-    history.value = (await workflowApi.listRuns(props.agentId, 30)).runs || []
+    const r = await workflowApi.listRuns(props.agentId, 30, histFilter.value || undefined)
+    history.value = r.runs || []
+    counts.value = r.status_counts || {}
   } catch (e) {
     ElMessage.error(errMsg(e))
   } finally {
     histLoading.value = false
+  }
+}
+
+/** 停止正在执行的工作流 */
+async function cancelRun() {
+  if (!currentRunId.value) return
+  cancelling.value = true
+  try {
+    const r = await workflowApi.cancelRun(currentRunId.value)
+    ElMessage[r.ok ? 'success' : 'warning'](r.message || (r.ok ? '已请求取消' : '取消失败'))
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  } finally {
+    cancelling.value = false
+  }
+}
+
+/** 补发工作流结果到原渠道客户（上次未送达时） */
+async function resend(runId: number) {
+  resending.value = runId
+  try {
+    const r = await workflowApi.resend(runId)
+    if (r.ok) ElMessage.success(r.message || '已发送')
+    else ElMessage.warning(r.message || '发送失败')
+    await loadHistory()
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  } finally {
+    resending.value = null
   }
 }
 
@@ -320,6 +492,9 @@ void API_BASE
 </script>
 
 <style scoped>
+.rp-history-bar { margin-bottom: 10px; }
+.rp-count { margin-left: 4px; font-size: 11px; opacity: 0.8; }
+.rp-timeout-hint { margin-left: 10px; font-size: 12px; color: #d46b08; }
 .rp-form { margin-bottom: 14px; }
 .rp-field { margin-bottom: 10px; }
 .rp-label { display: block; font-size: 13px; color: var(--text-body); margin-bottom: 4px; }

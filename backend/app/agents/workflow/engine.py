@@ -116,6 +116,23 @@ class NodeContext:
     perms: set[str] | None = None
     # 协作调用链（防循环），agent 节点用
     agent_chain: list[int] = field(default_factory=list)
+    # Token 用量累计：LLM 类节点每次调用都把 usage 累加到这里，
+    # 运行结束时汇总写入 WorkflowRun，供多租户成本核算。
+    usage: dict = field(default_factory=lambda: {
+        "prompt_tokens": 0, "completion_tokens": 0, "calls": 0,
+    })
+
+    def add_usage(self, u: dict | None) -> None:
+        """累加一次模型调用的用量。结构容错：不同 provider 字段名略有差异。"""
+        if not isinstance(u, dict):
+            return
+        self.usage["prompt_tokens"] += int(
+            u.get("prompt_tokens") or u.get("input_tokens") or 0
+        )
+        self.usage["completion_tokens"] += int(
+            u.get("completion_tokens") or u.get("output_tokens") or 0
+        )
+        self.usage["calls"] += 1
 
 
 # ==================== 节点执行器 ====================
@@ -153,6 +170,7 @@ async def _exec_llm(node: dict, data: dict, ctx: NodeContext) -> dict:
     if temp is None:
         temp = ctx.default_temperature if ctx.default_temperature is not None else 0.3
     res = await llm.chat(msgs, model=rm.model_name, temperature=temp)
+    ctx.add_usage(res.usage)
     return {"output": res.content, "usage": res.usage}
 
 
@@ -462,6 +480,7 @@ async def _run_loop_body(body: dict, scope: dict, ctx: NodeContext):
         msgs.append(ChatMessage(role="user", content=str(prompt)))
         temp = ctx.default_temperature if ctx.default_temperature is not None else 0.3
         res = await llm.chat(msgs, model=rm.model_name, temperature=temp)
+        ctx.add_usage(res.usage)
         return res.content
     if op == "code":
         import asyncio
@@ -583,6 +602,15 @@ NODE_EXECUTORS: dict[str, Callable] = {
     "end": _exec_end,
 }
 
+# 扩展节点（电商/办公场景）：定义在 nodes_extra，这里合并进同一注册表，
+# 执行路径、retry、变量渲染完全复用，无需改动主循环。
+from app.agents.workflow.nodes_extra import EXTRA_EXECUTORS as _EXTRA_EXECUTORS  # noqa: E402
+
+NODE_EXECUTORS.update(_EXTRA_EXECUTORS)
+
+# 已知节点类型（供 AI 生成与前端校验用）
+KNOWN_NODE_TYPES: tuple[str, ...] = tuple(NODE_EXECUTORS.keys())
+
 # 这些字段不在执行前渲染（含循环局部变量，由执行器内逐项渲染）
 _DEFERRED_RENDER: dict[str, tuple[str, ...]] = {"loop": ("body",)}
 
@@ -636,14 +664,17 @@ def _resolve_parallel_region(
 
 async def _run_parallel_region(
     p_id: str, nodes: dict, succ, pred, base_variables: dict, ctx: NodeContext
-) -> tuple[dict, list[dict], str, list[list[str]]]:
+) -> tuple[dict, list[dict], str, list[list[str]], list[dict]]:
     """并发执行 parallel 区域：每条分支独立 session + NodeContext 副本，asyncio.gather 并发。
 
-    返回 (合并后的变量, 各分支输出列表, join_id, 分支链)。
+    返回 (合并后的变量, 各分支输出列表, join_id, 分支链, 分支内节点记录)。
+    最后一项用于把分支节点写进 NodeRun —— 早先分支节点既不发事件也不落记录，
+    编排页看不到它们执行过。
     """
     branches, join_id = _resolve_parallel_region(p_id, nodes, succ, pred)
+    branch_records: list[dict] = []
 
-    async def _one(path: list[str]) -> dict:
+    async def _one(path: list[str], branch_idx: int) -> dict:
         from app.core.db import AsyncSessionLocal
 
         bvars = dict(base_variables)
@@ -651,7 +682,10 @@ async def _run_parallel_region(
         async with AsyncSessionLocal() as bdb:
             bctx = NodeContext(
                 db=bdb, ps=ctx.ps, run_id=ctx.run_id, tenant_id=ctx.tenant_id,
-                emit=None,  # 分支内不发 SSE（避免并发交错），由主循环汇总
+                # 分支内的进度事件直接转发给主 ctx.emit：
+                # 事件带 branch 标记，前端按 node_id 定位节点，不会交错错乱。
+                # 早先 emit=None 会让画布上分支节点一直灰着，看起来像卡死。
+                emit=ctx.emit,
                 default_model_config_id=ctx.default_model_config_id,
                 default_kb_ids=ctx.default_kb_ids,
                 default_system=ctx.default_system,
@@ -666,12 +700,30 @@ async def _run_parallel_region(
                 ex = NODE_EXECUTORS.get(nd["type"])
                 if not ex:
                     raise ValidationError(f"未知节点类型: {nd['type']}")
+                if ctx.emit:
+                    await ctx.emit({"type": "node_started", "node_id": nid,
+                                    "node_type": nd["type"], "branch": branch_idx})
+                t0 = time.monotonic()
                 out = await ex(nd, data, bctx)
                 bvars[nid] = out
                 outs[nid] = out
+                if ctx.emit:
+                    await ctx.emit({
+                        "type": "node_finished", "node_id": nid, "node_type": nd["type"],
+                        "status": "success", "input": data, "output": out,
+                        "latency_ms": int((time.monotonic() - t0) * 1000),
+                        "branch": branch_idx,
+                    })
+                branch_records.append({
+                    "node_id": nid, "node_type": nd["type"], "seq": 0, "status": "success",
+                    "input": data, "output": out,
+                    "latency_ms": int((time.monotonic() - t0) * 1000),
+                })
         return outs
 
-    results = await asyncio.gather(*[_one(p) for p in branches], return_exceptions=True)
+    results = await asyncio.gather(
+        *[_one(p, i) for i, p in enumerate(branches)], return_exceptions=True
+    )
     merged: dict = {}
     branch_list: list[dict] = []
     for r in results:
@@ -679,7 +731,7 @@ async def _run_parallel_region(
             raise r
         merged.update(r)
         branch_list.append(r)
-    return merged, branch_list, join_id, branches
+    return merged, branch_list, join_id, branches, branch_records
 
 
 
@@ -728,7 +780,7 @@ async def execute_graph(
             if ctx.emit:
                 await ctx.emit({"type": "node_started", "node_id": nid, "node_type": "parallel"})
             t0 = time.monotonic()
-            merged, branch_list, join_id, branches = await _run_parallel_region(
+            merged, branch_list, join_id, branches, branch_records = await _run_parallel_region(
                 nid, nodes, succ, pred, variables, ctx
             )
             lat = int((time.monotonic() - t0) * 1000)
@@ -740,6 +792,10 @@ async def execute_graph(
                 for b in path:
                     region_nodes[b] = nid
             region_nodes[join_id] = nid
+            # 分支内节点也落记录（seq 统一排在 parallel 之前）
+            for br in branch_records:
+                records.append({**br, "seq": seq})
+                seq += 1
             records.append({"node_id": nid, "node_type": "parallel", "seq": seq, "status": "success",
                             "output": {"branches": len(branches)}, "latency_ms": lat})
             records.append({"node_id": join_id, "node_type": "join", "seq": seq + 1, "status": "success",

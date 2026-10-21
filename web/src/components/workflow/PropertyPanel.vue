@@ -257,6 +257,274 @@
           </el-form-item>
         </template>
 
+        <!-- ==================== 数据处理 ==================== -->
+        <template v-else-if="node.type === 'table'">
+          <el-form-item label="数据源（行数组）">
+            <el-input v-model="config.rows" type="textarea" :rows="2" placeholder="{{http_1.output}}" @input="touch" />
+            <div class="pp-hint">{{ varHint }}；支持 JSON 数组或换行文本</div>
+          </el-form-item>
+          <el-form-item label="过滤条件（全部满足）">
+            <div v-for="(f, i) in filters" :key="i" class="pp-row">
+              <el-input v-model="f.field" placeholder="字段" style="width: 84px" @input="touch" />
+              <el-select v-model="f.op" style="width: 92px" @change="touch">
+                <el-option value="eq" label="等于" />
+                <el-option value="ne" label="不等于" />
+                <el-option value="contains" label="包含" />
+                <el-option value="gt" label="大于" />
+                <el-option value="lt" label="小于" />
+                <el-option value="not_empty" label="非空" />
+              </el-select>
+              <el-input v-model="f.value" placeholder="值" style="width: 84px" @input="touch" />
+              <el-button size="small" type="danger" :icon="Delete" @click="removeItem(filters, i)" />
+            </div>
+            <el-button size="small" :icon="Plus" @click="filters.push({ field: '', op: 'eq', value: '' }); touch()">添加条件</el-button>
+          </el-form-item>
+          <el-form-item label="排序">
+            <div class="pp-row">
+              <el-input v-model="config.sort.field" placeholder="字段" style="width: 130px" @input="touch" />
+              <el-switch v-model="config.sort.desc" active-text="降序" @change="touch" />
+            </div>
+          </el-form-item>
+          <el-form-item label="字段投影（留空=保留全部）">
+            <div v-for="(f, i) in fieldMaps" :key="i" class="pp-row">
+              <el-input v-model="f.name" placeholder="输出列名" style="width: 100px" @input="touch" />
+              <el-input v-model="f.from" placeholder="源字段（可点路径）" style="width: 120px" @input="touch" />
+              <el-button size="small" type="danger" :icon="Delete" @click="removeItem(fieldMaps, i)" />
+            </div>
+            <el-button size="small" :icon="Plus" @click="fieldMaps.push({ name: '', from: '' }); touch()">添加字段</el-button>
+          </el-form-item>
+          <el-form-item label="聚合汇总">
+            <div v-for="(a, i) in aggregates" :key="i" class="pp-row">
+              <el-input v-model="a.name" placeholder="结果名" style="width: 84px" @input="touch" />
+              <el-input v-model="a.field" placeholder="字段" style="width: 84px" @input="touch" />
+              <el-select v-model="a.op" style="width: 88px" @change="touch">
+                <el-option value="sum" label="求和" />
+                <el-option value="avg" label="平均" />
+                <el-option value="count" label="计数" />
+                <el-option value="min" label="最小" />
+                <el-option value="max" label="最大" />
+                <el-option value="distinct" label="去重数" />
+                <el-option value="join" label="拼接" />
+              </el-select>
+              <el-button size="small" type="danger" :icon="Delete" @click="removeItem(aggregates, i)" />
+            </div>
+            <el-button size="small" :icon="Plus" @click="aggregates.push({ name: '', field: '', op: 'sum' }); touch()">添加汇总</el-button>
+          </el-form-item>
+          <el-form-item label="去重">
+            <div class="pp-row">
+              <el-switch v-model="config.distinct" @change="touch" />
+              <el-input v-if="config.distinct" v-model="config.distinct_field" placeholder="按字段（留空=整行）" style="width: 150px" @input="touch" />
+            </div>
+          </el-form-item>
+          <el-form-item label="最多保留行数（0=不限）">
+            <el-input-number v-model="config.limit" :min="0" :max="5000" style="width: 100%" @change="touch" />
+          </el-form-item>
+          <el-form-item label="输出为 CSV">
+            <el-switch v-model="config.as_csv" @change="touch" />
+            <div class="pp-hint">关闭则 output 为 JSON。CSV 可直接喂给「文件处理」生成 Excel。</div>
+          </el-form-item>
+        </template>
+
+        <template v-else-if="node.type === 'mapping'">
+          <el-form-item label="字段映射">
+            <div v-for="(m, i) in mappings" :key="i" class="pp-row">
+              <el-input v-model="m.key" placeholder="目标字段" style="width: 110px" @input="touch" />
+              <el-input v-model="m.value" placeholder="值，可 {{引用}}" style="width: 150px" @input="touch" />
+              <el-button size="small" type="danger" :icon="Delete" @click="removeItem(mappings, i)" />
+            </div>
+            <el-button size="small" :icon="Plus" @click="mappings.push({ key: '', value: '' }); touch()">添加字段</el-button>
+            <div class="pp-hint">{{ varHint }}</div>
+          </el-form-item>
+        </template>
+
+        <template v-else-if="node.type === 'json_path'">
+          <el-form-item label="源数据">
+            <el-input v-model="config.source" type="textarea" :rows="2" placeholder="{{http_1.output}}" @input="touch" />
+          </el-form-item>
+          <el-form-item label="取值路径">
+            <el-input v-model="config.path" placeholder="data.items.0.id" @input="touch" />
+            <div class="pp-hint">用点号分隔；数组用数字下标。留空则返回整个对象。</div>
+          </el-form-item>
+        </template>
+
+        <template v-else-if="node.type === 'transform'">
+          <el-form-item label="输入值">
+            <el-input v-model="config.value" type="textarea" :rows="2" placeholder="{{start.query}}" @input="touch" />
+            <div class="pp-hint">{{ varHint }}</div>
+          </el-form-item>
+          <el-form-item label="转换方式">
+            <el-select v-model="config.op" style="width: 100%" @change="touch">
+              <el-option value="to_text" label="转文本" />
+              <el-option value="split" label="按分隔符拆成数组" />
+              <el-option value="join" label="数组合并成文本" />
+              <el-option value="extract" label="正则提取" />
+              <el-option value="to_number" label="提取数字（去千分位/货币符号）" />
+            </el-select>
+          </el-form-item>
+          <el-form-item v-if="config.op === 'split' || config.op === 'join'" label="分隔符">
+            <el-input v-model="config.separator" placeholder="\n 或 ," @input="touch" />
+          </el-form-item>
+          <template v-if="config.op === 'extract'">
+            <el-form-item label="正则表达式">
+              <el-input v-model="config.pattern" placeholder="订单号[:：]\s*(\w+)" class="pp-mono" @input="touch" />
+            </el-form-item>
+            <el-form-item label="捕获组（0=整体匹配）">
+              <el-input-number v-model="config.group" :min="0" style="width: 100%" @change="touch" />
+            </el-form-item>
+          </template>
+        </template>
+
+        <template v-else-if="node.type === 'collection'">
+          <el-form-item label="操作">
+            <el-select v-model="config.op" style="width: 100%" @change="touch">
+              <el-option value="merge" label="合并（保留重复）" />
+              <el-option value="union" label="并集（去重）" />
+              <el-option value="intersect" label="交集" />
+              <el-option value="diff" label="差集（第一个减去其余）" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="列表（每行一个引用）">
+            <el-input v-model="listsText" type="textarea" :rows="3" class="pp-mono" />
+            <div class="pp-hint">示例：{{ listExample }}</div>
+          </el-form-item>
+        </template>
+
+        <template v-else-if="node.type === 'batch'">
+          <el-form-item label="待分批列表">
+            <el-input v-model="config.items" type="textarea" :rows="2" placeholder="{{http_1.items}}" @input="touch" />
+            <div class="pp-hint">{{ varHint }}</div>
+          </el-form-item>
+          <el-form-item label="每批数量">
+            <el-input-number v-model="config.size" :min="1" :max="500" style="width: 100%" @change="touch" />
+          </el-form-item>
+        </template>
+
+        <template v-else-if="node.type === 'text_template'">
+          <el-form-item label="段落">
+            <div v-for="(s, i) in sections" :key="i" class="pp-section">
+              <div class="pp-row">
+                <el-input v-model="s.title" placeholder="小标题（可空）" style="width: 130px" @input="touch" />
+                <el-button size="small" type="danger" :icon="Delete" @click="removeItem(sections, i)" />
+              </div>
+              <el-input v-model="s.content" type="textarea" :rows="3" placeholder="{{llm_1.output}}" @input="touch" />
+            </div>
+            <el-button size="small" :icon="Plus" @click="sections.push({ title: '', content: '' }); touch()">添加段落</el-button>
+            <div class="pp-hint">{{ varHint }}</div>
+          </el-form-item>
+        </template>
+
+        <!-- ==================== 办公 ==================== -->
+        <template v-else-if="node.type === 'email'">
+          <el-form-item label="发送账号">
+            <el-select v-model="config.account_id" clearable placeholder="选择个人邮箱账号" style="width: 100%" @change="touch">
+              <el-option v-for="a in mailAccounts" :key="a.id" :value="a.id" :label="a.email_addr || a.label" />
+            </el-select>
+            <div class="pp-hint">需先在「邮件」页配置个人邮箱账号（含 SMTP）。</div>
+          </el-form-item>
+          <el-form-item label="收件人（逗号分隔）">
+            <el-input v-model="config.to" placeholder="a@b.com,c@d.com" @input="touch" />
+            <div class="pp-hint">{{ varHint }}</div>
+          </el-form-item>
+          <el-form-item label="主题">
+            <el-input v-model="config.subject" @input="touch" />
+          </el-form-item>
+          <el-form-item label="正文">
+            <el-input v-model="config.body" type="textarea" :rows="5" placeholder="{{text_1.output}}" @input="touch" />
+          </el-form-item>
+        </template>
+
+        <template v-else-if="node.type === 'summarize'">
+          <el-form-item label="待处理文本">
+            <el-input v-model="config.text" type="textarea" :rows="3" placeholder="{{http_1.output}}" @input="touch" />
+            <div class="pp-hint">{{ varHint }}</div>
+          </el-form-item>
+          <el-form-item label="任务类型">
+            <el-select v-model="config.mode" style="width: 100%" @change="touch">
+              <el-option value="summary" label="要点摘要" />
+              <el-option value="extract" label="结构化抽取（输出 JSON）" />
+              <el-option value="classify" label="分类（输出类别名）" />
+              <el-option value="sentiment" label="情感倾向" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="模型">
+            <el-select v-model="config.model_config_id" clearable placeholder="默认模型" style="width: 100%" @change="touch">
+              <el-option v-for="m in chatModels" :key="m.id" :value="m.id" :label="m.display_name || m.model_name" />
+            </el-select>
+          </el-form-item>
+        </template>
+
+        <template v-else-if="node.type === 'router'">
+          <el-form-item label="分类结果">
+            <el-input v-model="config.value" placeholder="{{摘要_1.output}}" @input="touch" />
+            <div class="pp-hint">通常接「摘要抽取」的 classify 输出。匹配方式为「包含」。{{ varHint }}</div>
+          </el-form-item>
+          <el-form-item label="路由规则">
+            <div v-for="(c, i) in routerCases" :key="i" class="pp-router-case">
+              <div class="pp-row">
+                <el-input v-model="c.handle" placeholder="出线名" style="width: 100px" @input="touch" />
+                <el-button size="small" type="danger" :icon="Delete" @click="removeItem(routerCases, i)" />
+              </div>
+              <el-input
+                :model-value="(c.values || []).join(',')"
+                placeholder="匹配值，逗号分隔：退货,退款"
+                @input="(v: string) => { c.values = v.split(',').map((x) => x.trim()).filter(Boolean); touch() }"
+              />
+            </div>
+            <el-button size="small" :icon="Plus" @click="routerCases.push({ handle: '', values: [] }); touch()">添加规则</el-button>
+            <div class="pp-hint">都不命中走 default 出线。</div>
+          </el-form-item>
+        </template>
+
+        <!-- ==================== 集成 ==================== -->
+        <template v-else-if="node.type === 'http_form'">
+          <el-form-item label="URL">
+            <el-input v-model="config.url" placeholder="https://..." @input="touch" />
+            <div class="pp-hint">{{ varHint }}</div>
+          </el-form-item>
+          <el-form-item label="方法">
+            <el-select v-model="config.method" style="width: 100%" @change="touch">
+              <el-option value="POST" label="POST" />
+              <el-option value="PUT" label="PUT" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="编码">
+            <el-radio-group v-model="config.encoding" @change="touch">
+              <el-radio-button value="form">表单 form-data</el-radio-button>
+              <el-radio-button value="json">JSON</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="提交字段">
+            <div v-for="(f, i) in formFields" :key="i" class="pp-row">
+              <el-input v-model="f.name" placeholder="字段名" style="width: 110px" @input="touch" />
+              <el-input v-model="f.value" placeholder="值，可 {{引用}}" style="width: 150px" @input="touch" />
+              <el-button size="small" type="danger" :icon="Delete" @click="removeItem(formFields, i)" />
+            </div>
+            <el-button size="small" :icon="Plus" @click="formFields.push({ name: '', value: '' }); touch()">添加字段</el-button>
+          </el-form-item>
+        </template>
+
+        <template v-else-if="node.type === 'webhook'">
+          <el-form-item label="回调 URL">
+            <el-input v-model="config.url" placeholder="https://erp.example.com/hook" @input="touch" />
+            <div class="pp-hint">{{ varHint }}</div>
+          </el-form-item>
+          <el-form-item label="推送字段">
+            <div v-for="(f, i) in webhookFields" :key="i" class="pp-row">
+              <el-input v-model="f.name" placeholder="字段名" style="width: 110px" @input="touch" />
+              <el-input v-model="f.value" placeholder="值，可 {{引用}}" style="width: 150px" @input="touch" />
+              <el-button size="small" type="danger" :icon="Delete" @click="removeItem(webhookFields, i)" />
+            </div>
+            <el-button size="small" :icon="Plus" @click="webhookFields.push({ name: '', value: '' }); touch()">添加字段</el-button>
+          </el-form-item>
+        </template>
+
+        <template v-else-if="node.type === 'delay'">
+          <el-form-item label="等待秒数（上限 300）">
+            <el-input-number v-model="config.seconds" :min="0" :max="300" :step="1" style="width: 100%" @change="touch" />
+            <div class="pp-hint">长等待会占住执行器，超过 30 秒建议改用定时任务。</div>
+          </el-form-item>
+        </template>
+
         <el-form-item v-if="node.type !== 'start' && node.type !== 'end'" label="失败重试次数（0=不重试）">
           <el-input-number v-model="config.retry" :min="0" :max="5" style="width: 100%" @change="touch" />
         </el-form-item>
@@ -277,7 +545,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Delete, Plus } from '@element-plus/icons-vue'
-import { agentApi, channelApi, kbApi, notifyChannelApi, providerApi, type Agent, type ChannelItem, type KB, type ModelConfig, type NotifyChannelItem } from '@/api'
+import { agentApi, channelApi, kbApi, mailApi, notifyChannelApi, providerApi, type Agent, type ChannelItem, type KB, type ModelConfig, type NotifyChannelItem } from '@/api'
 import { NODE_META, type NodeMeta } from './meta'
 
 interface PanelNode { id: string; type: string; data: any }
@@ -294,6 +562,7 @@ const models = ref<ModelConfig[]>([])
 const agents = ref<Agent[]>([])
 const notifyChannels = ref<NotifyChannelItem[]>([])
 const extChannels = ref<ChannelItem[]>([])
+const mailAccounts = ref<{ id: number; label?: string; email_addr?: string }[]>([])
 
 const chatModels = computed(() => models.value.filter((m) => m.purpose === 'chat'))
 const refExample = computed(() => `{{${nodeId.value || 'nodeId'}.output}}`)
@@ -314,6 +583,20 @@ function setConfig(src: any) {
   if (props.node?.type === 'start') config.inputs = config.inputs || []
   if (props.node?.type === 'variable') config.assignments = config.assignments || []
   argsText.value = typeof config.args === 'string' ? config.args : JSON.stringify(config.args || {}, null, 2)
+  // 扩展节点的数组字段兜底：避免模板里直接 push 到 undefined
+  ensureArray('filters', { field: '', op: 'eq', value: '' })
+  ensureArray('fields', { name: '', from: '' })       // table / http_form / webhook 共用
+  ensureArray('aggregates', { name: '', field: '', op: 'sum' })
+  ensureArray('sections', { title: '', content: '' })
+  ensureArray('mappings', { key: '', value: '' })
+  ensureArray('cases', { handle: '', values: [] })
+  ensureArray('lists', '')
+  if (props.node?.type === 'table' && !config.sort) config.sort = { field: '', desc: false }
+}
+
+function ensureArray(key: string, seed: any) {
+  if (Array.isArray(config[key])) return
+  config[key] = seed === '' ? [] : [JSON.parse(JSON.stringify(seed))]
 }
 
 watch(
@@ -338,6 +621,28 @@ function removeCase(i: number) { config.cases.splice(i, 1); touch() }
 const assignments = computed<any[]>(() => config.assignments || (config.assignments = []))
 function addAssign() { config.assignments.push({ name: '', value: '' }); touch() }
 function removeAssign(i: number) { config.assignments.splice(i, 1); touch() }
+
+// ---- 扩展节点：通用数组字段与文本桥接 ----
+function removeItem(arr: any[], i: number) { arr.splice(i, 1); touch() }
+
+const filters = computed<any[]>(() => config.filters || (config.filters = []))
+const aggregates = computed<any[]>(() => config.aggregates || (config.aggregates = []))
+const sections = computed<any[]>(() => config.sections || (config.sections = []))
+const mappings = computed<any[]>(() => config.mappings || (config.mappings = []))
+const routerCases = computed<any[]>(() => config.cases || (config.cases = []))
+// 提示文案里要显示 {{x}} 字面量，模板插值会解析它，故在 script 里拼好
+const listExample = '{{a_1.items}} 与 {{b_1.items}} 各占一行'
+
+// table/http_form/webhook 的字段列表语义不同，但结构一致（name/from 或 name/value）
+const fieldMaps = computed<any[]>(() => config.fields || (config.fields = []))
+const formFields = computed<any[]>(() => config.fields || (config.fields = []))
+const webhookFields = computed<any[]>(() => config.fields || (config.fields = []))
+
+// collection.lists 用文本编辑（每行一个 {{引用}}），与数组互转
+const listsText = computed({
+  get: () => (config.lists || []).join('\n'),
+  set: (v: string) => { config.lists = v.split('\n').map((x) => x.trim()).filter(Boolean); touch() },
+})
 
 function setBodyOp(op: string) {
   config.body = { ...(config.body || {}), op }
@@ -385,6 +690,7 @@ onMounted(() => {
   agentApi.list().then((v) => (agents.value = v.filter((a) => a.type === 'agent'))).catch(() => {})
   notifyChannelApi.list().then((v) => (notifyChannels.value = v)).catch(() => {})
   channelApi.list().then((v) => (extChannels.value = v)).catch(() => {})
+  mailApi.listAccounts().then((v) => (mailAccounts.value = v)).catch(() => {})
 })
 </script>
 

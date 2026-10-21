@@ -21,7 +21,12 @@
               @mousedown.stop
               @click.stop="selectEdge(e.id)"
             />
-            <path :d="edgePath(e)" class="wf-edge" :class="{ on: selEdge === e.id }" marker-end="url(#wf-arrow)" />
+            <path
+              :d="edgePath(e)"
+              class="wf-edge"
+              :class="{ on: selEdge === e.id, taken: isTaken(e), active: isActive(e) }"
+              marker-end="url(#wf-arrow)"
+            />
             <text v-if="e.sourceHandle" class="wf-edge-label" :x="mid(e).x" :y="mid(e).y - 6" text-anchor="middle">
               {{ e.sourceHandle }}
             </text>
@@ -53,6 +58,14 @@
         >
           <div class="wf-node-id">{{ n.id }}</div>
           <div class="wf-node-label">{{ meta(n.type).icon }} {{ meta(n.type).label }}</div>
+
+          <!-- 运行时进度：已执行节点显示耗时，当前节点显示旋转环 -->
+          <span
+            v-if="status?.[n.id] === 'running'"
+            class="wf-node-spinner"
+            :style="{ borderTopColor: meta(n.type).color }"
+          />
+          <span v-if="latencyOf(n.id)" class="wf-node-latency">{{ latencyOf(n.id) }}</span>
 
           <!-- 输入端口 -->
           <span v-if="n.type !== 'start'" class="wf-port in" :data-inport="n.id" @mousedown.stop />
@@ -105,8 +118,16 @@ interface GNode { id: string; type: string; data: any; position: { x: number; y:
 interface GEdge { id: string; source: string; target: string; sourceHandle?: string }
 
 const props = withDefaults(
-  defineProps<{ graph: any; selectedId?: string | null; status?: Record<string, string> }>(),
-  { selectedId: null, status: () => ({}) },
+  defineProps<{
+    graph: any
+    selectedId?: string | null
+    status?: Record<string, string>
+    /** 已走过的边 id 集合（边 id 与 edges 里的 id 一致），用于高亮执行路径 */
+    takenEdges?: string[]
+    /** 节点耗时（ms），画在节点右下角 */
+    latency?: Record<string, number>
+  }>(),
+  { selectedId: null, status: () => ({}), takenEdges: () => [], latency: () => ({}) },
 )
 const emit = defineEmits<{ change: [graph: any]; select: [id: string | null] }>()
 
@@ -206,11 +227,15 @@ function nodeStyle(n: GNode) {
   }
 }
 
-// 出口 handle：条件/多路分支多出口，其余单出口（空 handle）
+// 出口 handle：条件/多路分支/分类路由多出口，其余单出口（空 handle）
 function outHandles(n: GNode): string[] {
   if (n.type === 'end') return []
   if (n.type === 'condition') return ['true', 'false']
   if (n.type === 'switch') {
+    const cases = (n.data?.cases || []).map((c: any) => c.handle).filter(Boolean)
+    return [...cases, 'default']
+  }
+  if (n.type === 'router') {
     const cases = (n.data?.cases || []).map((c: any) => c.handle).filter(Boolean)
     return [...cases, 'default']
   }
@@ -229,6 +254,23 @@ function outPortStyle(n: GNode, handle: string) {
 
 function nodeById(id: string): GNode | undefined {
   return nodes.value.find((x) => x.id === id)
+}
+
+// ---------- 执行路径高亮 ----------
+// takenEdges 是已执行完的边；active 边 = 源节点已完成且目标节点正在运行。
+function isTaken(e: GEdge): boolean {
+  return props.takenEdges.includes(e.id)
+}
+function isActive(e: GEdge): boolean {
+  if (isTaken(e)) return false
+  const src = props.status?.[e.source]
+  const tgt = props.status?.[e.target]
+  return src === 'success' && (tgt === 'running' || tgt === undefined)
+}
+function latencyOf(id: string): string {
+  const v = props.latency?.[id]
+  if (!v) return ''
+  return v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${v}ms`
 }
 
 function edgeEnds(e: GEdge) {
@@ -459,8 +501,18 @@ defineExpose({ addNode, updateNode, deleteNode, fit, removeNode })
 .wf-layer { position: absolute; left: 0; top: 0; }
 .wf-svg { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
 
-.wf-edge { fill: none; stroke: #b1b1b7; stroke-width: 2; }
+.wf-edge { fill: none; stroke: #b1b1b7; stroke-width: 2; transition: stroke 0.2s; }
 .wf-edge.on { stroke: var(--color-primary); stroke-width: 3; }
+/* 已执行的路径：加粗高亮 */
+.wf-edge.taken { stroke: #52c41a; stroke-width: 3.5; }
+/* 正在推进的边：流动虚线动画 */
+.wf-edge.active {
+  stroke: #1677ff;
+  stroke-width: 3;
+  stroke-dasharray: 8 6;
+  animation: wf-flow 0.7s linear infinite;
+}
+@keyframes wf-flow { to { stroke-dashoffset: -14; } }
 .wf-edge.temp { stroke: var(--color-primary); stroke-dasharray: 5 4; }
 .wf-edge-hit { fill: none; stroke: transparent; stroke-width: 14; pointer-events: stroke; cursor: pointer; }
 .wf-edge-label { font-size: 11px; fill: var(--text-secondary); }
@@ -483,6 +535,23 @@ defineExpose({ addNode, updateNode, deleteNode, fit, removeNode })
   cursor: move; user-select: none;
 }
 .wf-node.sel { box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.25); }
+/* 运行中的节点：脉冲光圈 */
+.wf-node:has(.wf-node-spinner) { animation: wf-pulse 1.4s ease-in-out infinite; }
+@keyframes wf-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.22); }
+  50% { box-shadow: 0 0 0 8px rgba(22, 119, 255, 0.06); }
+}
+.wf-node-spinner {
+  position: absolute; right: 6px; top: 6px;
+  width: 11px; height: 11px; border-radius: 50%;
+  border: 2px solid var(--border); border-top-color: var(--color-primary);
+  animation: wf-spin 0.7s linear infinite;
+}
+@keyframes wf-spin { to { transform: rotate(360deg); } }
+.wf-node-latency {
+  position: absolute; right: 6px; bottom: 3px;
+  font-size: 10px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
 .wf-node-id { font-size: 12px; font-weight: 600; color: var(--text-title); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wf-node-label { font-size: 11px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wf-node-del {
