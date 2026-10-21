@@ -34,7 +34,10 @@ class ChannelIn(BaseModel):
     service_mode: str | None = None  # qa=只答 | support=客服（可转人工）
     default_lang: str | None = None  # 默认回答语言（zh/en/ja/...，空=自动）
     default_agent_id: int | None = None
-    reply_mode: str | None = None  # rag | agent
+    reply_mode: str | None = None  # rag | smart | agent | workflow
+    progress_hint: bool | None = None  # 工作流型智能体的工作中提示
+    group_progress_mode: str | None = None  # off | first | throttle
+    group_progress_interval: int | None = None
     command_prefix: str | None = None
     greeting: str | None = None
     # 渠道附件入库
@@ -62,6 +65,9 @@ def _to_out(c: Channel) -> dict:
         "service_mode": getattr(c, "service_mode", "qa") or "qa",
         "default_lang": getattr(c, "default_lang", None),
         "default_agent_id": c.default_agent_id, "reply_mode": c.reply_mode,
+        "progress_hint": bool(getattr(c, "progress_hint", False)),
+        "group_progress_mode": getattr(c, "group_progress_mode", "off") or "off",
+        "group_progress_interval": int(getattr(c, "group_progress_interval", 15) or 15),
         "command_prefix": c.command_prefix, "greeting": c.greeting,
         "attach_ingest": getattr(c, "attach_ingest", "off") or "off",
         "attach_kb_ids": getattr(c, "attach_kb_ids", None) or [],
@@ -130,7 +136,10 @@ async def create_channel(
         service_mode=_norm_choice(body.service_mode, ("qa", "support"), "qa"),
         default_lang=(body.default_lang or "").strip() or None,
         default_agent_id=body.default_agent_id,
-        reply_mode=_norm_choice(body.reply_mode, ("rag", "smart", "agent"), "rag"),
+        reply_mode=_norm_choice(body.reply_mode, ("rag", "smart", "agent", "workflow"), "rag"),
+        progress_hint=bool(body.progress_hint),
+        group_progress_mode=_norm_choice(body.group_progress_mode, ("off", "first", "throttle"), "off"),
+        group_progress_interval=max(1, int(body.group_progress_interval or 15)),
         command_prefix=(body.command_prefix or "").strip() or "/",
         greeting=(body.greeting or "").strip() or None,
         attach_ingest=_norm_choice(body.attach_ingest, ("off", "bound", "all"), "off"),
@@ -167,7 +176,13 @@ async def update_channel(
     c.service_mode = _norm_choice(body.service_mode, ("qa", "support"), "qa")
     c.default_lang = (body.default_lang or "").strip() or None
     c.default_agent_id = body.default_agent_id
-    c.reply_mode = _norm_choice(body.reply_mode, ("rag", "smart", "agent"), "rag")
+    c.reply_mode = _norm_choice(body.reply_mode, ("rag", "smart", "agent", "workflow"), "rag")
+    if body.progress_hint is not None:
+        c.progress_hint = bool(body.progress_hint)
+    if body.group_progress_mode is not None:
+        c.group_progress_mode = _norm_choice(body.group_progress_mode, ("off", "first", "throttle"), "off")
+    if body.group_progress_interval is not None:
+        c.group_progress_interval = max(1, int(body.group_progress_interval))
     c.command_prefix = (body.command_prefix or "").strip() or "/"
     c.greeting = (body.greeting or "").strip() or None
     c.attach_ingest = _norm_choice(body.attach_ingest, ("off", "bound", "all"), "off")

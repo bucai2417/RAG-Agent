@@ -19,6 +19,14 @@ logger = get_logger("tasks.bg")
 
 # 持强引用，防 GC
 _TASKS: set[asyncio.Task] = set()
+# 关键任务：外部对接的异步回调等，退出时应优先让其完成而不是立刻取消。
+# 用任务名前缀标记（避免引入额外的元数据结构）。
+_CRITICAL_PREFIXES: tuple[str, ...] = ("hook_",)
+
+
+def _is_critical(t: asyncio.Task) -> bool:
+    name = t.get_name() or ""
+    return any(name.startswith(p) for p in _CRITICAL_PREFIXES)
 
 
 def spawn(name: str, coro: Coroutine) -> asyncio.Task:
@@ -44,15 +52,37 @@ def pending_count() -> int:
 
 
 async def shutdown(timeout: float = 5.0) -> None:
-    """退出时：取消所有在途后台任务并等待（有超时兜底，避免卡死退出）。"""
+    """退出时：取消所有在途后台任务并等待（有超时兜底，避免卡死退出）。
+
+    关键任务（外部对接的异步回调）先给一小段宽限期让其自然完成，
+    再统一取消 —— 否则一次重启就会让对接方永远等不到回调。
+    """
     if not _TASKS:
         return
     logger.info("bg_tasks_cancel", count=len(_TASKS))
+
     tasks = list(_TASKS)
-    for t in tasks:
+    critical = [t for t in tasks if _is_critical(t) and not t.done()]
+    others = [t for t in tasks if t not in critical]
+
+    # 关键任务：先等一会儿（最多 timeout），能跑完的就跑完
+    if critical:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*critical, return_exceptions=True), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning("bg_critical_shutdown_timeout", count=len(critical))
+
+    # 其余任务及仍未完成的关键任务：取消
+    remaining = [t for t in tasks if not t.done()]
+    for t in remaining:
         t.cancel()
-    try:
-        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=timeout)
-    except asyncio.TimeoutError:
-        logger.warning("bg_tasks_shutdown_timeout", count=len(_TASKS))
+    if remaining:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*remaining, return_exceptions=True), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning("bg_tasks_shutdown_timeout", count=len(remaining))
     _TASKS.clear()

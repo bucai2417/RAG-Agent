@@ -56,6 +56,52 @@ def _with_lang(query: str, lang: str | None) -> str:
     return f"[{inst}]\n{query}" if inst else query
 
 
+def _progress_enabled(channel) -> bool:
+    """渠道配置里的「工作中提示」开关（默认关）。
+
+    默认关是有意的：每来一个节点就往客户那边发一条消息，多数场景是噪音；
+    只有长流程（查订单、跑审批）才值得开。
+    """
+    return bool(getattr(channel, "progress_hint", False))
+
+
+class _GroupProgressGate:
+    """群聊进度节流闸门。
+
+    群聊里每条进度都会打扰所有成员，所以不能按节点逐条发。三种策略：
+    - off：完全不发（默认）
+    - first：只发第一条（"开始处理"），让人知道机器人动了，不再刷屏
+    - throttle：按配置的间隔发，保证长流程里偶尔有反馈
+
+    状态只在单次消息处理过程中有效（每次入站消息新建一个实例）。
+    """
+
+    def __init__(self, mode: str, interval_seconds: int) -> None:
+        self.mode = (mode or "off").lower()
+        self.interval = max(1, int(interval_seconds or 15))
+        self._last_at = 0.0
+        self._sent = 0
+
+    def should_send(self) -> bool:
+        if self.mode == "off":
+            return False
+        if self.mode == "first":
+            if self._sent:
+                return False
+            self._sent += 1
+            return True
+        if self.mode == "throttle":
+            import time as _t
+
+            now = _t.monotonic()
+            if now - self._last_at < self.interval:
+                return False
+            self._last_at = now
+            self._sent += 1
+            return True
+        return False
+
+
 async def handle_inbound(
     adapter, channel, msg: InboundMessage, *, send: bool = True
 ) -> str:
@@ -175,11 +221,50 @@ async def handle_inbound(
             #   rag    → 知识库问答（默认；已绑定内部账号时也可调工具）。
             reply_mode = getattr(channel, "reply_mode", "rag") or "rag"
             agent_id = cu.agent_id or (
-                channel.default_agent_id if reply_mode == "agent" else None
+                channel.default_agent_id if reply_mode in ("agent", "workflow") else None
             )
             if agent_id:
-                reply = await _run_agent(agent_id, conv.id, user, msg.content, images=images, lang=lang,
-                                         bound_user=bound_user)
+                # 进度提示：私聊按 progress_hint 开关逐节点发；
+                # 群聊走节流闸门（默认 off，避免刷屏；first/throttle 可配）。
+                on_progress = None
+                if _progress_enabled(channel):
+                    if msg.is_group:
+                        gate = _GroupProgressGate(
+                            getattr(channel, "group_progress_mode", "off"),
+                            getattr(channel, "group_progress_interval", 15),
+                        )
+                        if gate.mode != "off":
+                            async def on_progress(text: str, _adapter=adapter, _msg=msg, _gate=gate) -> None:
+                                if not _gate.should_send():
+                                    return
+                                try:
+                                    await _adapter.send_message(OutboundMessage(
+                                        content=text,
+                                        group_id=_msg.external_group,
+                                        user_id=None,
+                                        reply_to=_msg.message_id,
+                                        account=_msg.account,
+                                    ))
+                                except Exception:  # noqa: BLE001
+                                    pass
+                    else:
+                        async def on_progress(text: str, _adapter=adapter, _msg=msg) -> None:
+                            try:
+                                await _adapter.send_message(OutboundMessage(
+                                    content=text,
+                                    group_id=None,
+                                    user_id=_msg.external_user,
+                                    reply_to=_msg.message_id,
+                                    account=_msg.account,
+                                ))
+                            except Exception:  # noqa: BLE001
+                                pass
+
+                reply = await _run_agent(
+                    agent_id, conv.id, user, msg.content, images=images, lang=lang,
+                    bound_user=bound_user, attachments=attachments, on_progress=on_progress,
+                    channel=channel, msg=msg,
+                )
             else:
                 # smart 模式：强制启用工具循环（真正的智能问答能力）。
                 # rag 模式：绑定内部账号才开工具（保持原行为，外部客户纯问答）。
@@ -412,7 +497,8 @@ def _collect_citation_media(citations: list, limit: int = 5) -> list[dict]:
 
 async def _run_agent(agent_id: int, conversation_id: int, user, query: str,
                      images: list[dict] | None = None, lang: str | None = None,
-                     bound_user=None) -> str:
+                     bound_user=None, attachments: list[dict] | None = None,
+                     on_progress=None, channel=None, msg=None) -> str:
     from app.core.db import AsyncSessionLocal
     from app.models import Agent, Conversation
     from app.agents.runner import AgentRunner
@@ -426,9 +512,19 @@ async def _run_agent(agent_id: int, conversation_id: int, user, query: str,
         if not agent or not conv:
             return "智能体或会话不存在。"
         ps = principal_of(user, bound_user)
-        summary, history = await load_context(db, conv)
         # 权限码：绑定内部账号 → 真实权限；外部客户 → service_agent 只读档。
         perms = await _channel_user_perms(db, user, bound_user)
+
+        # 工作流型智能体：走工作流引擎（消息作为 start 第一个输入）。
+        # 早期版本这里只走 AgentRunner，导致渠道选中工作流智能体时行为不对。
+        if getattr(agent, "type", "agent") == "workflow":
+            return await _run_workflow_agent(
+                db, agent=agent, conv=conv, ps=ps, query=query, perms=perms,
+                attachments=attachments, on_progress=on_progress,
+                channel=channel, msg=msg,
+            )
+
+        summary, history = await load_context(db, conv)
         runner = AgentRunner(db, agent=agent, ps=ps, conversation=conv, history=history, summary=summary,
                              perms=perms, images=images or None,
                              allow_auto_write=bound_user is not None)
@@ -439,6 +535,90 @@ async def _run_agent(agent_id: int, conversation_id: int, user, query: str,
             elif evt.get("type") == "error":
                 text += f"\n[错误] {evt.get('message')}"
         return text or "（无回复）"
+
+
+async def _run_workflow_agent(db, *, agent, conv, ps, query: str, perms,
+                              attachments: list[dict] | None = None,
+                              on_progress=None, workflow=None,
+                              channel=None, msg=None) -> str:
+    """执行工作流型智能体（渠道场景）。
+
+    与编排页运行的区别：输入里额外带 `history`（多轮上下文）与 `attachments`（附件清单），
+    进度通过 on_progress 回调发给客户；审批暂停时自动建工单交给人工。
+    """
+    import time
+
+    from sqlalchemy import select
+
+    from app.agents.workflow.runner import run_workflow_for_channel
+    from app.models import Workflow, WorkflowRun
+
+    wf = workflow
+    if wf is None:
+        wf = (
+            await db.execute(
+                select(Workflow).where(Workflow.agent_id == agent.id).order_by(Workflow.id.desc())
+            )
+        ).scalars().first()
+    if not wf or not wf.graph or not (wf.graph.get("nodes")):
+        return "该智能体还没有配置工作流，请联系管理员。"
+
+    run = WorkflowRun(
+        tenant_id=ps.tenant_id, workflow_id=wf.id, agent_id=agent.id,
+        user_id=ps.user_id, conversation_id=conv.id, status="running",
+        input={"query": query}, graph_snapshot=wf.graph,
+        created_at=int(time.time() * 1000),
+        # 来源快照：异步审批通过后要回推客户，那时已无法反查入站消息身份
+        origin_channel_id=getattr(channel, "id", None),
+        origin_channel_kind=getattr(channel, "kind", None),
+        origin_external_user=getattr(msg, "external_user", None),
+        origin_external_group=getattr(msg, "external_group", None),
+    )
+    db.add(run)
+    await db.commit()
+    run_id = run.id
+
+    r = await run_workflow_for_channel(
+        graph=wf.graph, query=query, run_id=run_id, tenant_id=ps.tenant_id, ps=ps,
+        db=db, conversation=conv, attachments=attachments,
+        default_model_config_id=agent.model_config_id, default_kb_ids=agent.kb_ids,
+        default_system=agent.system_prompt,
+        default_temperature=(agent.config or {}).get("temperature"),
+        perms=perms, on_progress=on_progress,
+    )
+
+    # 审批暂停 → 自动建工单，让客服在后台看到并处理
+    if r.get("paused"):
+        try:
+            from sqlalchemy import select as _select
+
+            from app.models import ChannelUser
+            from app.services.service_ticket_service import create_ticket
+
+            # ChannelUser 只有 channel（kind 字符串）与 external_id，没有 channel_id
+            cu = (
+                await db.execute(
+                    _select(ChannelUser).where(
+                        ChannelUser.conversation_id == conv.id,
+                        ChannelUser.tenant_id == ps.tenant_id,
+                    )
+                )
+            ).scalars().first()
+
+            await create_ticket(
+                db, tenant_id=ps.tenant_id,
+                subject=f"工作流需要审批：{agent.name}"[:80],
+                content=f"客户：{query}\n运行 #{run_id} 停在审批节点 {r.get('node_id')}",
+                channel_kind=getattr(cu, "channel", None),
+                external_user=getattr(cu, "external_id", None),
+                channel_user_id=getattr(cu, "id", None),
+                conversation_id=conv.id,
+            )
+            await db.commit()
+        except Exception:  # noqa: BLE001
+            await db.rollback()
+            logger.exception("workflow_approval_ticket_failed", run_id=run_id)
+    return r.get("text") or "（无回复）"
 
 
 async def _reply(adapter, msg: InboundMessage, text: str, send: bool,

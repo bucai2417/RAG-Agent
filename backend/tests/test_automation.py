@@ -187,9 +187,13 @@ def test_webhook_endpoints_registered():
     from app.api.v1.webhooks import router
 
     paths = {r.path for r in router.routes}
-    assert "/hooks/{token}" in paths
+    # {handle} 同时接受自定义可读路径与随机 token
+    assert "/hooks/{handle}" in paths
     assert "/scheduled-tasks/{task_id}/webhook-token" in paths
     assert "/webhook-tokens/{token_id}" in paths
+    # 工作流接入点（外部系统直接调用工作流）
+    assert "/workflow-hooks" in paths
+    assert "/workflow-hooks/{hook_id}/toggle" in paths
 
 
 # ---- 事件总线 ----

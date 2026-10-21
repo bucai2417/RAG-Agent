@@ -93,6 +93,14 @@ FIELD_META: dict[str, dict[str, Any]] = {
                                 "help": "企业内网部署外部知识库时开启"},
     "connector_default_timeout": {"label": "出站超时（秒）", "group": "connector", "kind": "int"},
     "connector_max_top_k": {"label": "外部源召回上限", "group": "connector", "kind": "int"},
+    "webhook_allow_private_callback": {
+        "label": "允许工作流回调内网地址", "group": "connector", "kind": "bool",
+        "help": "企业自建客服台/ERP 部署在内网时开启。只影响 Webhook 回调，不影响知识库连接器",
+    },
+    "workflow_run_timeout_seconds": {
+        "label": "工作流单次运行超时（秒）", "group": "advanced", "kind": "int",
+        "help": "整条链的执行预算，超时中止。0 或留空用默认 600 秒；单个智能体可用 config.run_timeout_seconds 覆盖",
+    },
     # ---- MCP ----
     "mcp_allow_stdio": {"label": "允许本地 stdio MCP", "group": "mcp", "kind": "bool",
                         "help": "开启后会执行本地命令，注意安全"},

@@ -83,6 +83,7 @@
             <el-option value="rag" label="知识库问答（可选知识库，不选则纯聊天）" />
             <el-option value="smart" label="智能问答（同站内问答：工具调用 / 文件生成 / 管理员可直接操作平台）" />
             <el-option value="agent" label="智能体（选定智能体后由其回答）" />
+            <el-option value="workflow" label="工作流（选定工作流型智能体后执行其流程，可带审批/推送）" />
           </el-select>
         </el-form-item>
         <el-form-item label="服务模式" extra="只答=纯咨询；客服=识别转人工关键词并生成工单">
@@ -108,10 +109,28 @@
             <el-option v-for="k in kbs" :key="k.id" :value="k.id" :label="k.name" />
           </el-select>
         </el-form-item>
-        <el-form-item label="默认智能体（可空）">
+        <el-form-item label="默认智能体（可空）" :extra="form.reply_mode === 'workflow' ? '工作流模式下请选择一个「工作流型」智能体' : undefined">
           <el-select v-model="form.default_agent_id" clearable placeholder="不选 = 不使用智能体" style="width: 100%">
             <el-option v-for="a in agents" :key="a.id" :value="a.id" :label="a.name" />
           </el-select>
+        </el-form-item>
+        <el-form-item label="工作中提示" extra="工作流执行时把节点进度作为消息发给客户（私聊逐节点；群聊按下方策略）">
+          <el-switch v-model="form.progress_hint" />
+        </el-form-item>
+        <el-form-item v-if="form.progress_hint" label="群聊进度策略" extra="群聊里逐条发会刷屏，默认不发">
+          <el-select v-model="form.group_progress_mode" style="width: 200px">
+            <el-option value="off" label="不发送（默认）" />
+            <el-option value="first" label="只发第一条" />
+            <el-option value="throttle" label="按间隔节流" />
+          </el-select>
+          <el-input-number
+            v-if="form.group_progress_mode === 'throttle'"
+            v-model="form.group_progress_interval"
+            :min="1"
+            :max="600"
+            style="width: 130px; margin-left: 8px"
+          />
+          <span v-if="form.group_progress_mode === 'throttle'" class="text-muted" style="margin-left: 4px">秒</span>
         </el-form-item>
         <el-form-item label="指令前缀" extra="留空 = 默认 /">
           <el-input v-model="form.command_prefix" placeholder="/" style="width: 120px" />
@@ -213,7 +232,7 @@ const LANGS = [
   { v: 'pt', label: 'Português' },
 ]
 const meta = (k: string) => KIND_META[k] || { label: k, icon: 'Promotion', tag: 'info', hint: '' }
-const REPLY_MODE_LABEL: Record<string, string> = { rag: '知识库问答', smart: '智能问答', agent: '智能体' }
+const REPLY_MODE_LABEL: Record<string, string> = { rag: '知识库问答', smart: '智能问答', agent: '智能体', workflow: '工作流' }
 const replyModeLabel = (m?: string) => REPLY_MODE_LABEL[m || 'rag'] || (m || '知识库问答')
 
 const channels = ref<ChannelItem[]>([])
@@ -225,7 +244,7 @@ const edit = ref<ChannelItem | null>(null)
 const kind = ref('qqbot')
 const cfg = reactive<Record<string, any>>({})
 const wxToken = ref('')
-const form = reactive<any>({ name: '', enabled: true, reply_mode: 'rag', service_mode: 'qa', default_lang: null, kb_mode: 'auto', default_kb_ids: [], default_agent_id: null, command_prefix: '/', greeting: '', attach_ingest: 'off', attach_kb_ids: [], attach_max_mb: 20, attach_types: '' })
+const form = reactive<any>({ name: '', enabled: true, reply_mode: 'rag', service_mode: 'qa', default_lang: null, kb_mode: 'auto', default_kb_ids: [], default_agent_id: null, progress_hint: false, group_progress_mode: 'off', group_progress_interval: 15, command_prefix: '/', greeting: '', attach_ingest: 'off', attach_kb_ids: [], attach_max_mb: 20, attach_types: '' })
 const scanChannel = ref<ChannelItem | null>(null)
 const formScan = ref(false)
 const usersOpen = ref(false)
@@ -262,14 +281,17 @@ async function load() {
 function openModal(c?: ChannelItem) {
   edit.value = c || null
   Object.keys(cfg).forEach((k) => delete cfg[k])
-  Object.assign(form, { name: '', enabled: true, reply_mode: 'rag', service_mode: 'qa', default_lang: null, kb_mode: 'auto', default_kb_ids: [], default_agent_id: null, command_prefix: '/', greeting: '', attach_ingest: 'off', attach_kb_ids: [], attach_max_mb: 20, attach_types: '' })
+  Object.assign(form, { name: '', enabled: true, reply_mode: 'rag', service_mode: 'qa', default_lang: null, kb_mode: 'auto', default_kb_ids: [], default_agent_id: null, progress_hint: false, group_progress_mode: 'off', group_progress_interval: 15, command_prefix: '/', greeting: '', attach_ingest: 'off', attach_kb_ids: [], attach_max_mb: 20, attach_types: '' })
   wxToken.value = ''
   if (c) {
     kind.value = c.kind
     Object.assign(form, {
       name: c.name, enabled: c.enabled, reply_mode: c.reply_mode || 'rag', service_mode: c.service_mode || 'qa',
       default_lang: c.default_lang ?? null, kb_mode: c.kb_mode || 'auto', default_kb_ids: c.default_kb_ids || [],
-      default_agent_id: c.default_agent_id ?? null, command_prefix: c.command_prefix || '/', greeting: c.greeting || '',
+      default_agent_id: c.default_agent_id ?? null, progress_hint: !!c.progress_hint,
+      group_progress_mode: c.group_progress_mode || 'off',
+      group_progress_interval: c.group_progress_interval ?? 15,
+      command_prefix: c.command_prefix || '/', greeting: c.greeting || '',
       attach_ingest: c.attach_ingest || 'off', attach_kb_ids: c.attach_kb_ids || [],
       attach_max_mb: c.attach_max_mb ?? 20, attach_types: c.attach_types || '',
     })

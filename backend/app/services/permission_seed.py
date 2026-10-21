@@ -45,6 +45,8 @@ PERMISSIONS: list[tuple[str, str, str, str]] = [
     ("workflow:read", "查看工作流", "workflow", "read"),
     ("workflow:edit", "编辑工作流", "workflow", "edit"),
     ("workflow:run", "运行工作流", "workflow", "run"),
+    # 审核公共模板等跨租户管理动作（仅管理员/平台运营）
+    ("workflow:manage", "管理工作流模板", "workflow", "manage"),
     ("app:read", "查看应用", "app", "read"),
     ("app:edit", "编辑应用", "app", "edit"),
     ("app:run", "运行应用", "app", "run"),

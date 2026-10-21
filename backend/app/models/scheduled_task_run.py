@@ -12,7 +12,8 @@ class ScheduledTaskRun(Base, IdMixin, TimestampMixin, TenantMixin):
     __tablename__ = "scheduled_task_run"
 
     task_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
-    status: Mapped[str] = mapped_column(String(16), default="running")  # running/success/failed
+    # running/success/failed/waiting（waiting=工作流停在审批节点，等人工处理）
+    status: Mapped[str] = mapped_column(String(16), default="running")
     started_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # ms
     finished_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)

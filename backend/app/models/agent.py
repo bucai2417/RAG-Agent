@@ -169,6 +169,16 @@ class WorkflowRun(Base, IdMixin, TenantMixin):
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[int] = mapped_column(BigInteger, default=0)
     finished_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # ---- 来源渠道快照（仅渠道发起的运行有值）----
+    # 异步审批通过后要回推客户，此时入站消息早已处理完毕，无法再反查身份。
+    # 所以在创建运行时就记下「发给谁、发到哪」，回推时直接用。
+    origin_channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    origin_channel_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    origin_external_user: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    origin_external_group: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # ---- Token 用量（多租户成本核算）----
+    # 结构：{prompt_tokens, completion_tokens, calls, models: {模型名: {prompt, completion, calls}}}
+    usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class NodeRun(Base, IdMixin, TenantMixin):
@@ -186,6 +196,137 @@ class NodeRun(Base, IdMixin, TenantMixin):
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[int] = mapped_column(BigInteger, default=0)
     finished_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
+class WorkflowTemplate(Base, IdMixin, TimestampMixin, TenantMixin):
+    """用户保存的工作流模板（内置模板在代码常量里，不存表）。
+
+    存表是为了让每个团队积累自己的常用流程；内置模板随版本升级，
+    存表反而要写迁移去覆盖，所以留在代码里。
+    """
+
+    __tablename__ = "workflow_template"
+
+    name: Mapped[str] = mapped_column(String(128), default="")
+    category: Mapped[str] = mapped_column(String(32), default="自定义")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tags: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    graph: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 随模板一起走的测试用例：[{name, input, expected, assert_contains, history}]
+    # 套用时一并创建，让新工作流开箱就有回归基准。
+    cases: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    # ---- 跨租户共享 ----
+    # visibility：private（私有）/ pending（已申请公开，待审核）/ public（公开）
+    visibility: Mapped[str] = mapped_column(String(16), default="private")
+    published_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 套用计数（展示热门模板，也用于判断共享价值）
+    apply_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    # ---- 审核 ----
+    # 审核状态：none（未申请）/ pending / approved / rejected
+    review_status: Mapped[str] = mapped_column(String(16), default="none")
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reviewed_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # 发布时自动扫描的风险等级：none/low/medium/high（供审核员参考）
+    risk_level: Mapped[str] = mapped_column(String(8), default="none")
+    # 完整扫描明细：[{node_id, node_type, level, reason, hint}]
+    risk_findings: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # ---- 评分 ----
+    # 汇总冗余（避免每次列表都聚合）：rating_sum / rating_count
+    rating_sum: Mapped[int] = mapped_column(Integer, default=0)
+    rating_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class WorkflowTemplateRating(Base, IdMixin, TimestampMixin, TenantMixin):
+    """模板评分：每租户对每个模板只能打一次分（可改）。
+
+    用独立表而非只存聚合值，是为了：
+    - 防重复评分（唯一约束）
+    - 允许用户修改自己的评分
+    - 将来做「评价内容」时不用改表结构
+    """
+
+    __tablename__ = "workflow_template_rating"
+    __table_args__ = (
+        UniqueConstraint("template_id", "tenant_id", name="uq_template_rating_tenant"),
+    )
+
+    template_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    rating: Mapped[int] = mapped_column(Integer, default=5)  # 1-5
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
+class WorkflowCallbackDelivery(Base, IdMixin, TimestampMixin, TenantMixin):
+    """Webhook 异步回调的投递记录（含重试状态）。
+
+    为什么独立成表而不是塞进 run.output：
+    重试是跨请求的 —— 进程重启后还要能续投，需要独立行来更新
+    status/attempts/next_attempt_at。
+    """
+
+    __tablename__ = "workflow_callback_delivery"
+
+    run_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    # 加密存储的 HMAC 密钥（回调签名用）
+    secret: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # pending（待首次投递）/ retrying（等待重试）/ sent / dead（放弃）
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_attempt_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # ms
+    last_attempt_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
+class WorkflowVersion(Base, IdMixin, TimestampMixin, TenantMixin):
+    """工作流版本快照：每次发布存一份，可回滚。
+
+    与 Workflow.version 的区别：那个只是自增计数，改坏了没法恢复。
+    这张表存完整 graph 快照，回滚就是把快照写回 Workflow.graph。
+    """
+
+    __tablename__ = "workflow_version"
+
+    workflow_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    graph: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+
+class WorkflowTest(Base, IdMixin, TimestampMixin, TenantMixin):
+    """工作流测试用例：把调试对话固化成可回归的断言。
+
+    挂在 agent 上而非图快照：图会随编辑变化，用例描述的是「这个助手应有的表现」，
+    应跨图版本存活。
+    """
+
+    __tablename__ = "workflow_test"
+
+    agent_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(128), default="")
+    input: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # start 输入
+    expected: Mapped[str | None] = mapped_column(Text, nullable=True)  # 期望输出包含的片段
+    # True=断言包含（默认）；False=只做冒烟（能跑完即通过）
+    assert_contains: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 多轮上下文：[{role: "user"|"assistant", content: "..."}]
+    # 空表示单轮用例。多轮用例会把这些历史拼进 history 变量，
+    # 用于验证「刚才那个订单」这类指代是否能被正确解析。
+    history: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # 上次执行结果（列表页直接展示，避免每次打开都跑）
+    last_status: Mapped[str | None] = mapped_column(String(16), nullable=True)  # passed/failed/error/waiting
+    last_actual: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_run_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
 
 class AgentAction(Base, IdMixin, TimestampMixin, TenantMixin):

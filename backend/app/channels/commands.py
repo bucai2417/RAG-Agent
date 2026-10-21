@@ -32,6 +32,8 @@ HELP_TEXT = """可用指令：
 /agent list      查看可用智能体
 /agent use <id>  切换智能体
 /agent off       取消智能体，回到知识库问答
+/run list        查看可执行的工作流
+/run <id> <参数> 执行指定工作流（如 /run 5 订单号 A123）
 /new             新建会话（清空上下文）
 /whoami          查看当前身份与设置
 /myuid           查看我的 id（用于接收定时任务/工作流的推送）
@@ -128,7 +130,7 @@ async def cmd_whoami(ctx: CommandContext, args: list[str]) -> str:
         f"身份：{cu.display_name or cu.external_id}\n"
         f"知识库：{kbs or '未设置'}\n"
         f"智能体：{agent or '未启用'}\n"
-        f"回复模式：{ {'rag': '知识库问答', 'smart': '智能问答', 'agent': '智能体'}.get(ctx.channel.reply_mode, ctx.channel.reply_mode) }"
+        f"回复模式：{ {'rag': '知识库问答', 'smart': '智能问答', 'agent': '智能体', 'workflow': '工作流'}.get(ctx.channel.reply_mode, ctx.channel.reply_mode) }"
     )
 
 
@@ -142,6 +144,85 @@ async def cmd_myuid(ctx: CommandContext, args: list[str]) -> str:
     lines.append(f"我的用户 id：{cu.external_id}")
     lines.append("（如需私聊推送，接收对象填上面的用户 id，类型选「个人」）")
     return "\n".join(lines)
+
+
+async def cmd_run(ctx: CommandContext, args: list[str]) -> str:
+    """按需执行工作流：/run list 列出可执行工作流；/run <id|名称> [参数] 执行。
+
+    与「渠道默认工作流」互补：默认工作流处理所有消息，`/run` 用于客户主动调用
+    某个特定流程（如「查订单」「开票」），适合「一个客服渠道 + 多个业务动作」的形态。
+    """
+    from app.agents.workflow.runner import run_workflow_for_channel
+    from app.models import Workflow, WorkflowRun
+
+    cu = ctx.channel_user
+    sub = args[0] if args else ""
+
+    rows = (
+        await ctx.db.execute(
+            select(Workflow).where(Workflow.tenant_id == ctx.user.tenant_id)
+            .order_by(Workflow.id.desc()).limit(50)
+        )
+    ).scalars().all()
+    # 只挂到 workflow 型智能体且图非空的工作流才可执行
+    runnable: list[tuple[int, str, object]] = []
+    for wf in rows:
+        if not (wf.graph or {}).get("nodes"):
+            continue
+        a = await ctx.db.get(Agent, wf.agent_id) if wf.agent_id else None
+        if not a or a.type != "workflow":
+            continue
+        runnable.append((a.id, f"{a.name}（#{a.id}）", (a, wf)))
+
+    if not sub or sub.lower() == "list":
+        if not runnable:
+            return "当前没有可执行的工作流（需管理员在「智能体 → 工作流」里发布）。"
+        lines = ["可执行的工作流："]
+        for aid, label, _ in runnable:
+            lines.append(f"  [#{aid}] {label}")
+        lines.append("用 /run <id> <参数> 执行，例如 /run 5 订单号 A123")
+        return "\n".join(lines)
+
+    # 解析目标：id 或名称模糊匹配
+    target = None
+    if sub.isdigit():
+        target = next((r for r in runnable if r[0] == int(sub)), None)
+    if target is None:
+        target = next((r for r in runnable if sub in r[1]), None)
+    if target is None:
+        return f"没找到工作流「{sub}」。发送 /run list 查看可用的。"
+
+    aid, label, (agent, wf) = target
+    payload = " ".join(args[1:]).strip() or "开始"
+    cu.agent_id = aid  # 记住选择，后续普通消息也走它
+    await ctx.db.flush()
+
+    import time
+
+    from app.models import Conversation, WorkflowRun
+
+    conv = await ctx.db.get(Conversation, cu.conversation_id) if cu.conversation_id else None
+    run = WorkflowRun(
+        tenant_id=ctx.user.tenant_id, workflow_id=wf.id, agent_id=aid,
+        user_id=ctx.user.id, conversation_id=cu.conversation_id, status="running",
+        input={"query": payload}, graph_snapshot=wf.graph, created_at=int(time.time() * 1000),
+    )
+    ctx.db.add(run)
+    await ctx.db.commit()
+    run_id = run.id
+
+    from app.middleware.auth_dep import get_user_permission_codes
+
+    perms = await get_user_permission_codes(ctx.db, ctx.user)
+    r = await run_workflow_for_channel(
+        graph=wf.graph, query=payload, run_id=run_id, tenant_id=ctx.user.tenant_id,
+        ps=ctx.ps, db=ctx.db, conversation=conv, attachments=None,
+        default_model_config_id=agent.model_config_id, default_kb_ids=agent.kb_ids,
+        default_system=agent.system_prompt,
+        default_temperature=(agent.config or {}).get("temperature"),
+        perms=perms,
+    )
+    return r.get("text") or "（工作流无输出）"
 
 
 async def cmd_ticket(ctx: CommandContext, args: list[str]) -> str:
@@ -298,6 +379,7 @@ COMMANDS = {
     "help": cmd_help,
     "kb": cmd_kb,
     "agent": cmd_agent,
+    "run": cmd_run,
     "new": cmd_new,
     "whoami": cmd_whoami,
     "myuid": cmd_myuid,

@@ -60,6 +60,7 @@ async def execute_task(task_id: int, *, manual: bool = False) -> None:
 
             # 超时保护：task.timeout_seconds 生效（0/None 表示不限制）
             timeout_s = t.timeout_seconds or 0
+            paused_node: str | None = None
             if timeout_s > 0:
                 try:
                     ok, result_text, error_text, wf_run_id, run_atts = await asyncio.wait_for(
@@ -74,10 +75,18 @@ async def execute_task(task_id: int, *, manual: bool = False) -> None:
                     except Exception:  # noqa: BLE001
                         pass
             else:
-                ok, result_text, error_text, wf_run_id, run_atts = await _do_run(db, t)
+                try:
+                    ok, result_text, error_text, wf_run_id, run_atts = await _do_run(db, t)
+                except _SchedulerPaused as sp:
+                    # 工作流停在审批节点：既不是成功也不是失败，等人工处理
+                    paused_node = sp.node_id
+                    ok, result_text, error_text, wf_run_id, run_atts = (
+                        False, "", f"工作流停在审批节点 {sp.node_id}，等待人工处理", None, None,
+                    )
             finished = int(time.time() * 1000)
             run = await db.get(ScheduledTaskRun, run_row_id)
-            run.status = "success" if ok else "failed"
+            # waiting：有审批待处理，别记成 failed（否则会触发失败告警与重试）
+            run.status = "waiting" if paused_node else ("success" if ok else "failed")
             run.finished_at = finished
             run.duration_ms = finished - started
             run.output = (result_text or "")[:8000]
@@ -197,13 +206,16 @@ async def _trigger_dependents(task_id: int) -> None:
 
 
 
-async def _do_run(db, t) -> tuple[bool, str, str, int | None]:
-    """真正执行任务体。返回 (成功, 结果文本, 错误文本, workflow_run_id)。
+async def _do_run(db, t) -> tuple[bool, str, str, int | None, list[dict] | None]:
+    """真正执行任务体。返回 (成功, 结果文本, 错误文本, workflow_run_id, 附件)。
 
     不创建会话、不落 Message：结果只写进 ScheduledTaskRun（在 execute_task 落库）。
+
+    审批暂停以 _SchedulerPaused 抛出（而非返回失败），让调用方区分
+    「需要人处理」与「执行出错」。
     """
     from app.agents.runner import AgentRunner
-    from app.agents.workflow.engine import NodeContext, execute_graph
+    from app.agents.workflow.engine import NodeContext, WorkflowPaused, execute_graph
     from app.middleware.auth_dep import get_user_permission_codes, load_principal_set
     from app.models import Agent, User, Workflow, WorkflowRun
 
@@ -234,9 +246,11 @@ async def _do_run(db, t) -> tuple[bool, str, str, int | None]:
                 default_system=agent.system_prompt, default_temperature=(agent.config or {}).get("temperature"),
                 perms=perms,
             )
-            final, _ = await execute_graph(wf.graph, inputs, ctx)
+            final, _records = await execute_graph(wf.graph, inputs, ctx)
             r2 = await db.get(WorkflowRun, run_id)
             r2.status = "success"; r2.output = final; r2.finished_at = int(time.time() * 1000)
+            if ctx.usage and (ctx.usage.get("calls") or 0) > 0:
+                r2.usage = dict(ctx.usage)
             text = str(final.get("output", final)) if isinstance(final, dict) else str(final)
             attachments = await _collect_artifacts(db, final, t.tenant_id)
             return True, text, "", run_id, attachments
@@ -258,9 +272,53 @@ async def _do_run(db, t) -> tuple[bool, str, str, int | None]:
                 if evt.get("type") == "delta":
                     text += evt.get("text", "")
             return True, text, "", None, []
+    except WorkflowPaused as p:
+        # 定时任务里撞到审批节点：不是失败，是「等人处理」。
+        # 必须单独捕获 —— WorkflowPaused 继承 Exception，落进下面的通用 except
+        # 会被记成执行失败，且 WorkflowRun 永远停在 running。
+        await _mark_paused(db, t, p)
+        raise _SchedulerPaused(p.node_id, p.info or {}) from p
     except Exception as e:  # noqa: BLE001
         logger.exception("scheduled_task_run_failed", task_id=t.id)
         return False, "", str(e)[:1000], None, []
+
+
+class _SchedulerPaused(Exception):
+    """内部信号：定时任务的工作流停在审批节点。
+
+    与「执行失败」区分开，让 execute_task 把 ScheduledTaskRun 记成 waiting
+    而不是 failed，并在结果里提示需要人工审批。
+    """
+
+    def __init__(self, node_id: str, info: dict) -> None:
+        super().__init__(f"等待审批: {node_id}")
+        self.node_id = node_id
+        self.info = info
+
+
+async def _mark_paused(db, t, p) -> None:
+    """把该任务最新的 WorkflowRun 置为 waiting 并保存变量快照。"""
+    from sqlalchemy import select as _select
+
+    from app.models import WorkflowRun
+
+    try:
+        run = (
+            await db.execute(
+                _select(WorkflowRun)
+                .where(WorkflowRun.agent_id == t.agent_id)
+                .order_by(WorkflowRun.id.desc())
+                .limit(1)
+            )
+        ).scalars().first()
+        if run is not None and run.status == "running":
+            run.status = "waiting"
+            run.pending_node_id = p.node_id
+            run.state = {"variables": p.variables or {}}
+            run.finished_at = int(time.time() * 1000)
+            await db.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("scheduler_paused_mark_failed", task_id=t.id)
 
 
 async def _collect_artifacts(db, final, tenant_id: int) -> list[dict]:

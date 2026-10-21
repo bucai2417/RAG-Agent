@@ -25,9 +25,15 @@ class Channel(Base, IdMixin, TimestampMixin, TenantMixin):
     # 默认语言（多语言客服：zh/en/ja/... 空=自动判断）
     default_lang: Mapped[str | None] = mapped_column(String(16), nullable=True)
     default_agent_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # 默认智能体
-    reply_mode: Mapped[str] = mapped_column(String(16), default="rag")  # rag/agent
+    reply_mode: Mapped[str] = mapped_column(String(16), default="rag")  # rag/smart/agent/workflow
     command_prefix: Mapped[str] = mapped_column(String(8), default="/")
     greeting: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 工作中提示：工作流型智能体执行时把节点进度发给客户（默认关）
+    progress_hint: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 群聊进度提示策略：off（不发，默认）/ first（只发第一条）/ throttle（按间隔节流）
+    # 群聊每节点都发会刷屏，所以默认不在群里发；需要时按策略收窄频率。
+    group_progress_mode: Mapped[str] = mapped_column(String(16), default="off")
+    group_progress_interval: Mapped[int] = mapped_column(Integer, default=15)  # 秒（throttle 用）
     # ---- 渠道附件入库（外部用户发来的文档进知识库）----
     # off=不入库(默认,最安全) / bound=仅已绑定内部账号的渠道用户 / all=所有渠道用户(管理员显式开)
     attach_ingest: Mapped[str] = mapped_column(String(8), default="off")

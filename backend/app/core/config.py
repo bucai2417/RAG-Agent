@@ -143,6 +143,15 @@ class Settings(BaseSettings):
     connector_default_timeout: int = 15    # 连接器出站超时（秒）
     connector_max_top_k: int = 20          # 外部源单次召回的候选上限
 
+    # Webhook 回调：企业自建客服台/ERP 常部署在内网，回调地址天然是 10.x / 192.168.x。
+    # 与 connector_allow_private 分开，是为了收窄安全面 —— 只想接通内网客服系统时
+    # 不必同时放开知识库连接器。
+    webhook_allow_private_callback: bool = False
+
+    # 工作流单次运行的执行预算（秒）。单节点都有超时，但整条链没有上限时
+    # loop + LLM 可能跑几十分钟、长期占用连接与模型配额。
+    workflow_run_timeout_seconds: int = 600
+
     # MCP（Model Context Protocol）
     mcp_allow_stdio: bool = False           # 是否允许本地 stdio 型 MCP server（会执行命令）
     mcp_stdio_allowed_cmds: str = "python,python3,node,npx,uvx"  # stdio 命令白名单（首 token）
