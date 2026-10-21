@@ -384,7 +384,8 @@ async def upgrade_upload(
     from app.services.audit_service import record_audit
 
     record_audit(db, action="skill.upgrade", resource_type="skill", resource_id=skill_id)
-    return {"skill_id": skill_id, "package_id": pkg.id, "version": pkg.version, "files": len(pack.files)}
+    return {"skill_id": skill_id, "package_id": pkg.id, "version": pkg.version,
+            "files": len(pkg.files or [])}
 
 
 @router.post("/{skill_id}/upgrade")
@@ -401,19 +402,17 @@ async def upgrade_from_url(
     if not sk or sk.tenant_id != user.tenant_id:
         raise NotFoundError("技能不存在")
     try:
-        data = await skill_pack_service.fetch_url_zip(body.url)
-        pack = skill_pack_service.extract_zip(data, user.tenant_id)
-        source_type = "github" if "github" in body.url else "url"
-        _, pkg = await skill_pack_service.register_pack(
-            db, tenant_id=user.tenant_id, owner_id=user.id, pack=pack,
-            source_type=source_type, source_uri=body.url, upgrade_skill_id=skill_id,
+        _, pkg = await skill_pack_service.upgrade_from_url(
+            db, tenant_id=user.tenant_id, owner_id=user.id, url=body.url,
+            skill_id=skill_id, subpath=body.subpath,
         )
     except ValueError as e:
         raise ValidationError(str(e))
     from app.services.audit_service import record_audit
 
     record_audit(db, action="skill.upgrade", resource_type="skill", resource_id=skill_id)
-    return {"skill_id": skill_id, "package_id": pkg.id, "version": pkg.version, "files": len(pack.files)}
+    return {"skill_id": skill_id, "package_id": pkg.id, "version": pkg.version,
+            "files": len(pkg.files or [])}
 
 
 @router.get("/{skill_id}/package")

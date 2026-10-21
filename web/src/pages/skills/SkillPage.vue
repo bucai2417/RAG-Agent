@@ -1,69 +1,77 @@
 <template>
   <PageContainer title="技能" subtitle="技能 = SKILL.md（提示词/说明）+ 可选脚本。从 .md / .zip / GitHub 导入，或手动创建能力包与 HTTP 工具，供智能体调用">
     <template #extra>
-      <template v-if="canEdit">
+      <template v-if="tab === 'mine' && canEdit">
         <el-button :icon="Upload" @click="importOpen = true">导入技能包</el-button>
         <el-button type="primary" :icon="Plus" @click="openCreate">新建技能</el-button>
       </template>
     </template>
 
-    <div class="app-card panel">
-      <el-table :data="topSkills" v-loading="loading" row-key="id" :expand-row-keys="expandedKeys" @expand-change="onExpand">
-        <el-table-column type="expand">
-          <template #default="{ row }">
-            <div class="sub-wrap">
-              <el-table v-if="childrenOf(row.id).length" :data="childrenOf(row.id)" size="small">
-                <el-table-column prop="name" label="子技能" width="200" />
-                <el-table-column prop="description" label="描述" show-overflow-tooltip />
-                <el-table-column label="状态" width="90">
-                  <template #default="{ row: c }"><el-tag size="small" :type="c.status === 'active' ? 'success' : 'info'">{{ c.status === 'active' ? '启用' : '停用' }}</el-tag></template>
-                </el-table-column>
-                <el-table-column label="操作" width="160">
-                  <template #default="{ row: c }">
-                    <el-button size="small" @click="viewPackage(c.id)">查看</el-button>
-                    <el-popconfirm v-if="canEdit" title="删除该子技能？" @confirm="removeSkill(c.id)">
-                      <template #reference><el-button size="small" danger :icon="Delete" /></template>
-                    </el-popconfirm>
-                  </template>
-                </el-table-column>
-              </el-table>
-              <span v-else class="text-muted">（无子技能）</span>
-            </div>
-          </template>
-        </el-table-column>
-        <el-table-column label="名称" min-width="200">
-          <template #default="{ row }">
-            <span class="sk-name">
-              <el-icon class="sk-ico"><Grid /></el-icon>
-              <b>{{ row.name }}</b>
-              <el-tag v-if="row.kind === 'collection'" size="small" type="info">集合</el-tag>
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column label="类型" width="110">
-          <template #default="{ row }"><el-tag size="small" :type="kindMeta(row.kind).tag">{{ kindMeta(row.kind).label }}</el-tag></template>
-        </el-table-column>
-        <el-table-column label="来源" width="100">
-          <template #default="{ row }"><el-tag size="small" :type="row.source === 'package' ? 'warning' : 'info'">{{ row.source === 'package' ? '技能包' : '手建' }}</el-tag></template>
-        </el-table-column>
-        <el-table-column prop="description" label="描述" show-overflow-tooltip />
-        <el-table-column label="操作" width="220">
-          <template #default="{ row }">
-            <el-button v-if="row.source === 'package'" size="small" @click="viewPackage(row.id)">查看包</el-button>
-            <template v-if="row.kind !== 'collection' && canEdit">
-              <el-button size="small" :icon="Edit" @click="openEdit(row)" />
-              <el-popconfirm title="删除该技能？" @confirm="removeSkill(row.id)">
-                <template #reference><el-button size="small" danger :icon="Delete" /></template>
-              </el-popconfirm>
-            </template>
-            <el-popconfirm v-if="row.kind === 'collection' && canEdit" title="删除该集合（含全部子技能）？" @confirm="removeSkill(row.id)">
-              <template #reference><el-button size="small" danger :icon="Delete" /></template>
-            </el-popconfirm>
-          </template>
-        </el-table-column>
-      </el-table>
-      <el-empty v-if="!loading && !topSkills.length" description="暂无技能，点击右上角新建或导入技能包" :image-size="70" />
-    </div>
+    <el-tabs v-model="tab" class="skill-tabs">
+      <el-tab-pane label="我的技能" name="mine">
+        <div class="app-card panel">
+          <el-table :data="topSkills" v-loading="loading" row-key="id" :expand-row-keys="expandedKeys" @expand-change="onExpand">
+            <el-table-column type="expand">
+              <template #default="{ row }">
+                <div class="sub-wrap">
+                  <el-table v-if="childrenOf(row.id).length" :data="childrenOf(row.id)" size="small">
+                    <el-table-column prop="name" label="子技能" width="200" />
+                    <el-table-column prop="description" label="描述" show-overflow-tooltip />
+                    <el-table-column label="状态" width="90">
+                      <template #default="{ row: c }"><el-tag size="small" :type="c.status === 'active' ? 'success' : 'info'">{{ c.status === 'active' ? '启用' : '停用' }}</el-tag></template>
+                    </el-table-column>
+                    <el-table-column label="操作" width="160">
+                      <template #default="{ row: c }">
+                        <el-button size="small" @click="viewPackage(c.id)">查看</el-button>
+                        <el-popconfirm v-if="canEdit" title="删除该子技能？" @confirm="removeSkill(c.id)">
+                          <template #reference><el-button size="small" danger :icon="Delete" /></template>
+                        </el-popconfirm>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                  <span v-else class="text-muted">（无子技能）</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="名称" min-width="200">
+              <template #default="{ row }">
+                <span class="sk-name">
+                  <el-icon class="sk-ico"><Grid /></el-icon>
+                  <b>{{ row.name }}</b>
+                  <el-tag v-if="row.kind === 'collection'" size="small" type="info">集合</el-tag>
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column label="类型" width="110">
+              <template #default="{ row }"><el-tag size="small" :type="kindMeta(row.kind).tag">{{ kindMeta(row.kind).label }}</el-tag></template>
+            </el-table-column>
+            <el-table-column label="来源" width="100">
+              <template #default="{ row }"><el-tag size="small" :type="row.source === 'package' ? 'warning' : 'info'">{{ row.source === 'package' ? '技能包' : '手建' }}</el-tag></template>
+            </el-table-column>
+            <el-table-column prop="description" label="描述" show-overflow-tooltip />
+            <el-table-column label="操作" width="220">
+              <template #default="{ row }">
+                <el-button v-if="row.source === 'package'" size="small" @click="viewPackage(row.id)">查看包</el-button>
+                <template v-if="row.kind !== 'collection' && canEdit">
+                  <el-button size="small" :icon="Edit" @click="openEdit(row)" />
+                  <el-popconfirm title="删除该技能？" @confirm="removeSkill(row.id)">
+                    <template #reference><el-button size="small" danger :icon="Delete" /></template>
+                  </el-popconfirm>
+                </template>
+                <el-popconfirm v-if="row.kind === 'collection' && canEdit" title="删除该集合（含全部子技能）？" @confirm="removeSkill(row.id)">
+                  <template #reference><el-button size="small" danger :icon="Delete" /></template>
+                </el-popconfirm>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-if="!loading && !topSkills.length" description="暂无技能，点击右上角新建或导入技能包" :image-size="70" />
+        </div>
+      </el-tab-pane>
+
+      <el-tab-pane label="技能市场" name="market" lazy>
+        <SkillMarketPanel @installed="onMarketInstalled" />
+      </el-tab-pane>
+    </el-tabs>
 
     <!-- 新建 / 编辑技能 -->
     <el-dialog v-model="open" :title="editSkill ? '编辑技能' : '新建技能'" width="640px">
@@ -224,6 +232,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Upload, Edit, Delete, Grid, Document, Link, VideoPlay, CopyDocument, Download } from '@element-plus/icons-vue'
 import PageContainer from '@/components/PageContainer.vue'
+import SkillMarketPanel from './SkillMarketPanel.vue'
 import { kbApi, skillApi, type KB, type Skill, type SkillPackageInfo } from '@/api'
 import { errMsg } from '@/api/http'
 import { useAuthStore } from '@/stores/auth'
@@ -231,6 +240,8 @@ import { useAuthStore } from '@/stores/auth'
 const auth = useAuthStore()
 const canEdit = computed(() => auth.hasPermission('skill:edit') || auth.hasPermission('skill:manage'))
 const canRun = computed(() => auth.hasPermission('skill:run') || canEdit.value)
+
+const tab = ref<'mine' | 'market'>('mine')
 
 const skills = ref<Skill[]>([])
 const kbs = ref<KB[]>([])
@@ -502,6 +513,11 @@ async function saveFile() {
 }
 
 onMounted(load)
+
+/** 市场安装成功：刷新「我的技能」列表，并提示用户切过去看 */
+function onMarketInstalled() {
+  void load()
+}
 </script>
 
 <style scoped>

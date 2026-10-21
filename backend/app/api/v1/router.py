@@ -31,6 +31,7 @@ from app.api.v1 import (
     service_api,
     service_tickets,
     settings,
+    skill_market,
     skills,
     sso,
     system,
@@ -56,6 +57,8 @@ api_router.include_router(chat_room.router)
 api_router.include_router(provider.router)
 api_router.include_router(rbac.router)
 api_router.include_router(agents.router)
+# 技能市场必须注册在 skills 之前：skills 的 /{skill_id}/... 动态段会抢占 /skills/market/*
+api_router.include_router(skill_market.router)
 api_router.include_router(skills.router)
 api_router.include_router(tools.router)
 api_router.include_router(mcp.router)

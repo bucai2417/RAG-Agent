@@ -647,6 +647,28 @@ async def import_from_markdown(
     )
 
 
+async def upgrade_from_url(
+    db, *, tenant_id: int, owner_id: int, url: str, skill_id: int,
+    subpath: str | None = None,
+):
+    """用 URL/GitHub 覆盖已有技能包（拉最新 zip → 解析 → 覆盖 skill/package）。
+
+    subpath：多技能仓库必须指定，否则 extract_zip 会因「包含多个技能」拒绝提取；
+    来源会以 `url#subpath` 记录，保证「已安装」匹配与后续升级都能还原子技能。
+
+    调用方负责校验 skill_id 属于该租户并记录审计。
+    返回 (skill, package)。
+    """
+    data = await fetch_url_zip(url)
+    pack = extract_zip(data, tenant_id, subpath=subpath)
+    source_type = "github" if "github" in url else "url"
+    source_uri = f"{url}#{subpath}" if subpath else url
+    return await register_pack(
+        db, tenant_id=tenant_id, owner_id=owner_id, pack=pack,
+        source_type=source_type, source_uri=source_uri, upgrade_skill_id=skill_id,
+    )
+
+
 async def register_collection(
     db, *, tenant_id: int, owner_id: int, col: ParsedCollection,
     source_type: str, source_uri: str | None, name_hint: str | None = None,
