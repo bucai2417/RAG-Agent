@@ -1,6 +1,6 @@
 {
   "name": "rag-desktop",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "企业 RAG 知识库智能体平台 - 桌面版",
   "main": "main.js",
   "author": "",
