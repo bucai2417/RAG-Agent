@@ -67,6 +67,16 @@ FIELD_META: dict[str, dict[str, Any]] = {
     "github_token": {"label": "GitHub API Token（技能搜索用）", "group": "retrieval", "kind": "secret",
                      "help": "配置后技能搜索配额由 10 次/分钟升至 30 次/分钟；只读公开仓库无需勾选任何 scope"},
     "vector_max_scan": {"label": "向量扫描上限（0=不限）", "group": "retrieval", "kind": "int"},
+    # ---- 上下文压缩 ----
+    "context_compress_threshold": {
+        "label": "上下文压缩阈值（token）", "group": "retrieval", "kind": "int",
+        "help": "会话上下文超过该值就把早期对话摘要成一段，只保留最近若干条原文。"
+                "问答页输入框右侧圆环满格即触发；0 = 用内置默认 4000",
+    },
+    "context_keep_recent": {
+        "label": "压缩后保留最近消息数", "group": "retrieval", "kind": "int",
+        "help": "压缩完成后仍以原文保留的消息条数（越多越不丢细节，但也更占上下文）；0 = 用内置默认 6",
+    },
     # ---- 在线更新 ----
     "update_check_enabled": {"label": "允许检查更新", "group": "advanced", "kind": "bool",
                              "help": "关闭后「关于/更新」不再请求 GitHub Release"},

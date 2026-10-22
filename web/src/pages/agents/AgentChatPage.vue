@@ -143,23 +143,34 @@
           <el-tag v-for="(a, i) in pendingAtts" :key="a.file_key" closable @close="pendingAtts.splice(i, 1)">{{ a.name }}</el-tag>
         </div>
 
-        <!-- 输入区 -->
-        <div class="composer">
-          <el-tooltip content="上传图片/文档/视频，也可直接把文件拖进来" placement="top">
-            <el-button :icon="Paperclip" @click="pickFile" />
-          </el-tooltip>
-          <input ref="fileRef" type="file" hidden multiple
-            accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.csv,.txt,.md,image/*,video/*" @change="onPick" />
-          <el-input
+        <!-- 输入区：圆角卡片 + 内嵌底部工具栏（与「智能问答」同一套组件） -->
+        <div class="composer-wrap">
+          <ChatComposer
             v-model="input"
-            type="textarea"
-            :autosize="{ minRows: 1, maxRows: 4 }"
-            resize="none"
+            :streaming="streaming"
+            :can-send="canSend"
             placeholder="输入问题，Enter 发送，Shift+Enter 换行"
-            @keydown.enter.exact.prevent="send"
-          />
-          <el-button v-if="streaming" type="danger" :icon="SwitchButton" @click="stop">停止</el-button>
-          <el-button v-else type="primary" :icon="Promotion" @click="send">发送</el-button>
+            @send="send"
+            @stop="stop"
+          >
+            <template #left>
+              <el-tooltip content="上传图片/文档/视频，也可直接把文件拖进来" placement="top">
+                <button type="button" class="cp-btn" @click="pickFile">
+                  <el-icon><Paperclip /></el-icon>
+                </button>
+              </el-tooltip>
+              <input ref="fileRef" type="file" hidden multiple
+                accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.csv,.txt,.md,image/*,video/*" @change="onPick" />
+            </template>
+            <template #context>
+              <ContextRing
+                :stats="ctxStats"
+                :has-conv="!!convId"
+                :compressing="!!ctxStats?.compressing"
+                @refresh="refreshContext"
+              />
+            </template>
+          </ChatComposer>
         </div>
       </section>
     </div>
@@ -190,7 +201,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Plus, MoreFilled, Edit, Delete, List, Paperclip, Promotion, SwitchButton,
+  Plus, MoreFilled, Edit, Delete, List, Paperclip,
   DocumentCopy, Select, CloseBold, ArrowDown, ArrowLeft, ChatLineRound, UploadFilled,
 } from '@element-plus/icons-vue'
 import MarkdownBody from '@/components/MarkdownBody.vue'
@@ -198,9 +209,11 @@ import AttachmentView from '@/components/AttachmentView.vue'
 import ReasoningBlock from '@/components/ReasoningBlock.vue'
 import ToolSteps from '@/components/ToolSteps.vue'
 import PendingActionCard from '@/components/PendingActionCard.vue'
+import ChatComposer from '@/components/ChatComposer.vue'
+import ContextRing from '@/components/ContextRing.vue'
 import {
   agentApi, chatApi, confirmToolAction, docApi, providerApi, streamChat, API_BASE,
-  type Agent, type AgentMode, type Attachment, type Citation, type Conversation,
+  type Agent, type AgentMode, type Attachment, type Citation, type ContextStats, type Conversation,
   type ModelConfig, type PendingActionEvt, type StreamHandlers,
 } from '@/api'
 import { errMsg } from '@/api/http'
@@ -234,8 +247,12 @@ const input = ref('')
 const msgs = ref<Msg[]>([])
 const convId = ref<number>()
 const convs = ref<Conversation[]>([])
+const ctxStats = ref<ContextStats | null>(null)
+let ctxTimer: ReturnType<typeof setTimeout> | null = null
 const pendingAtts = ref<Attachment[]>([])
 const streaming = ref(false)
+/** 有正文或只有附件都可以发；纯空白且无附件时禁用发送键 */
+const canSend = computed(() => !!input.value.trim() || pendingAtts.value.length > 0)
 const fileRef = ref<HTMLInputElement>()
 const listRef = ref<any>(null)
 const dragging = ref(false)
@@ -253,6 +270,34 @@ async function loadConvs() {
     convs.value = all.filter((c) => (c as any).settings?.agent_id === agentId)
   } catch (e) {
     ElMessage.error(errMsg(e))
+  }
+}
+
+/**
+ * 拉取上下文占用（输入框圆环）。压缩是后台异步任务，
+ * 高水位时补拉一次，让环口能自己回落。
+ */
+async function refreshContext(afterMs = 0) {
+  const cid = convId.value
+  if (!cid) {
+    ctxStats.value = null
+    return
+  }
+  if (ctxTimer) {
+    clearTimeout(ctxTimer)
+    ctxTimer = null
+  }
+  try {
+    const s = await chatApi.context(cid)
+    if (convId.value === cid) ctxStats.value = s
+  } catch {
+    /* ignore */
+  }
+  if (afterMs) {
+    ctxTimer = setTimeout(() => {
+      ctxTimer = null
+      if (convId.value === cid) refreshContext()
+    }, afterMs)
   }
 }
 
@@ -275,6 +320,11 @@ function newConv() {
   const greeting = (agent.value?.config as any)?.greeting
   msgs.value = greeting ? [{ role: 'assistant', content: greeting }] : []
   pendingAtts.value = []
+  ctxStats.value = null
+  if (ctxTimer) {
+    clearTimeout(ctxTimer)
+    ctxTimer = null
+  }
 }
 
 async function openConversation(cid: number) {
@@ -294,6 +344,7 @@ async function openConversation(cid: number) {
         steps: (m as any).tool_calls,
       }))
     scrollToBottom()
+    refreshContext()
   } catch (e) {
     ElMessage.error(errMsg(e))
   }
@@ -432,6 +483,10 @@ async function send() {
             return { ...m, steps }
           }),
         onPendingAction: (evt) => patchLast((m) => ({ ...m, pending: evt, streaming: false })),
+        onContext: (s) => {
+          ctxStats.value = s
+          if (s.percent >= 70 || s.compressing) refreshContext(2500)
+        },
         onDone: (mid) => patchLast((m) => ({ ...m, id: mid, streaming: false })),
         onError: (msg) => ElMessage.error(msg),
       },
@@ -445,6 +500,8 @@ async function send() {
     ctrl.value = null
     patchLast((m) => ({ ...m, streaming: false }))
     loadConvs()
+    // 兜底：用户中途停止时可能收不到 context 事件
+    if (!ctxStats.value) refreshContext()
   }
 }
 
@@ -470,6 +527,10 @@ async function confirmAction(idx: number, actionId: number, decision: 'approve' 
           return { ...m, steps }
         }),
       onPendingAction: (p) => patchAt(idx, (m) => ({ ...m, pending: p, pendingResolved: false, streaming: false })),
+      onContext: (s) => {
+        ctxStats.value = s
+        if (s.percent >= 70 || s.compressing) refreshContext(2500)
+      },
       onDone: (mid) => patchAt(idx, (m) => ({ ...m, id: mid, streaming: false, pending: undefined })),
       onError: (msg) => ElMessage.error(msg),
     })
@@ -481,6 +542,7 @@ async function confirmAction(idx: number, actionId: number, decision: 'approve' 
   } finally {
     streaming.value = false
     loadConvs()
+    if (!ctxStats.value) refreshContext()
   }
 }
 
@@ -541,7 +603,10 @@ function jumpToMessage(idx: number) {
 }
 
 onMounted(load)
-onBeforeUnmount(() => ctrl.value?.abort())
+onBeforeUnmount(() => {
+  ctrl.value?.abort()
+  if (ctxTimer) clearTimeout(ctxTimer)
+})
 </script>
 
 <style scoped>
@@ -621,10 +686,18 @@ onBeforeUnmount(() => ctrl.value?.abort())
   background: var(--color-primary); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
 }
 
-.pending-atts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; flex-shrink: 0; }
-.composer { display: flex; gap: 8px; align-items: flex-end; padding: 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
-.composer :deep(.el-textarea__inner) { font-size: 14px; }
-.composer :deep(.el-button) { flex-shrink: 0; }
+.pending-atts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 16px 0; flex-shrink: 0; }
+
+/* 输入区：卡片自带边框与圆角，外层只负责留白 */
+.composer-wrap { padding: 10px 16px 12px; flex-shrink: 0; }
+.cp-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; flex-shrink: 0;
+  border: none; border-radius: 9px; background: transparent;
+  color: var(--text-secondary); font-size: 16px; cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.cp-btn:hover { background: var(--bg-muted); color: var(--color-primary); }
 
 .dp-label { font-size: 12px; color: var(--text-secondary); }
 .dp-snippet { background: #fffbe6; border-left: 3px solid #faad14; padding: 8px 12px; margin: 6px 0 12px; border-radius: 4px; white-space: pre-wrap; font-size: 13px; }

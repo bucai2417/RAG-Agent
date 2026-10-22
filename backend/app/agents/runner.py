@@ -464,7 +464,7 @@ class AgentRunner:
             )
         )
         await self.db.commit()
-        self._maybe_schedule_compress()
+        await self._maybe_schedule_compress()
 
         yield {"type": "citations", "citations": citations_json}
         # 引用真实性校验（与问答页一致）：答案若出现不存在的 [n] 编号则告警
@@ -479,18 +479,22 @@ class AgentRunner:
         yield {"type": "usage", "usage": norm, "latency_ms": latency, "turns": turns}
         yield {"type": "done", "message_id": asst_id}
 
-    def _maybe_schedule_compress(self) -> None:
-        """落库后异步触发上下文压缩（不阻塞响应）。仅持久化会话需要。"""
+    async def _maybe_schedule_compress(self) -> None:
+        """落库后异步触发上下文压缩（不阻塞响应）。仅持久化会话需要。
+
+        不再用 self.history 预判阈值：它是裁到最近 N 条的窗口，长度恒定，
+        判不出整段会话是否超限（旧实现因此永不触发）。阈值判断交给
+        maybe_compress 在独立 session 里读全量历史完成。
+        submit 是协程，必须 await，否则协程不会执行。
+        """
         if not self.persist or self.conversation is None:
             return
         try:
-            from app.services.context_service import THRESHOLD_TOKENS, _compress_job
-            from app.services.token_est import estimate_messages
+            from app.services.context_service import _compress_job
             from app.tasks.queue import submit
 
-            if estimate_messages(self.history) + 200 >= THRESHOLD_TOKENS:
-                cid = self.conversation.id
-                submit(f"compress:{cid}", lambda: _compress_job(cid))
+            cid = self.conversation.id
+            await submit(f"compress:{cid}", lambda: _compress_job(cid))
         except Exception:  # noqa: BLE001
             logger.exception("schedule_compress_failed")
 
@@ -662,8 +666,16 @@ class AgentRunner:
             self.conversation.message_count = (self.conversation.message_count or 0) + 2
             asst_id = asst.id
         await self.db.commit()
-        self._maybe_schedule_compress()
+        await self._maybe_schedule_compress()
         yield {"type": "usage", "usage": norm, "latency_ms": latency, "turns": turns}
+        # 上下文占用快照：智能体页输入框的圆环与问答页共用同一口径
+        if self.conversation is not None:
+            try:
+                from app.services.context_service import context_stats
+
+                yield {"type": "context", **(await context_stats(self.db, self.conversation))}
+            except Exception:  # noqa: BLE001
+                logger.exception("context_stats_failed")
         yield {"type": "done", "message_id": asst_id}
 
     async def _single_turn(self, llm, rm, messages, eff: EffectiveConfig) -> AsyncIterator[dict]:

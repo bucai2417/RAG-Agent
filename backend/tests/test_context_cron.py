@@ -118,3 +118,69 @@ def test_context_compress():
     finally:
         loop.close()
         asyncio.set_event_loop(None)
+
+
+async def _run_stats_and_threshold():
+    """context_stats 口径必须与真正触发压缩的判断一致。"""
+    from sqlalchemy import select
+
+    from app.core.config import settings
+    from app.core.db import AsyncSessionLocal, init_models
+    from app.models import Conversation, Message, Tenant, User
+    from app.services import context_service as cs
+
+    await init_models()
+    async with AsyncSessionLocal() as db:
+        t = (await db.execute(select(Tenant).where(Tenant.slug == "ctx"))).scalar_one_or_none()
+        if not t:
+            t = Tenant(name="CTX", slug="ctx"); db.add(t); await db.flush()
+        u = (await db.execute(select(User).where(User.username == "ctx_u"))).scalar_one_or_none()
+        if not u:
+            u = User(tenant_id=t.id, username="ctx_u", password_hash="x"); db.add(u); await db.flush()
+        conv = Conversation(tenant_id=t.id, user_id=u.id, title="stats")
+        db.add(conv); await db.flush()
+        # 少量消息：远低于阈值
+        for i in range(4):
+            db.add(Message(tenant_id=t.id, conversation_id=conv.id,
+                           role="user" if i % 2 == 0 else "assistant", content=f"短消息{i}"))
+        await db.commit()
+        cid = conv.id
+
+    async with AsyncSessionLocal() as db:
+        conv = await db.get(Conversation, cid)
+        s = await cs.context_stats(db, conv)
+        assert s["available"] is True
+        assert s["compressed"] is False
+        assert s["message_count"] == 4
+        assert s["limit_tokens"] == cs.threshold_tokens()
+        assert 0 < s["percent"] < 100
+        # 未超阈值 → 不压缩
+        assert await cs.maybe_compress(db, cid) is False
+
+    # 阈值可热改：调低到极低值后同样 4 条消息就该判超限
+    orig = settings.context_compress_threshold
+    try:
+        settings.context_compress_threshold = 1
+        async with AsyncSessionLocal() as db:
+            conv = await db.get(Conversation, cid)
+            s2 = await cs.context_stats(db, conv)
+            assert s2["limit_tokens"] == 1
+            assert s2["percent"] == 100.0
+            assert s2["used_tokens"] > s2["limit_tokens"]
+    finally:
+        settings.context_compress_threshold = orig
+
+    # 无会话时给出安全空值，而不是抛错
+    async with AsyncSessionLocal() as db:
+        blank = await cs.context_stats(db, None)
+        assert blank["available"] is False and blank["used_tokens"] == 0
+
+
+def test_context_stats_matches_threshold():
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run_stats_and_threshold())
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)

@@ -131,6 +131,26 @@ export interface Conversation {
   summary?: string | null
 }
 
+/** 上下文占用快照：输入框圆形进度环的数据源，与后端压缩判断同源 */
+export interface ContextStats {
+  available: boolean
+  conversation_id: number | null
+  /** 已占用 token（摘要 + 未压缩原文历史） */
+  used_tokens: number
+  /** 触发压缩的阈值，环满即压缩 */
+  limit_tokens: number
+  /** 压缩后仍保留的最近消息条数 */
+  keep_recent: number
+  percent: number
+  compressed: boolean
+  summary_tokens: number
+  watermark: number
+  message_count: number
+  /** 已被折叠进摘要的消息条数 */
+  archived_messages?: number
+  compressing: boolean
+}
+
 export interface Message {
   id: number
   conversation_id: number
@@ -324,6 +344,9 @@ export const chatApi = {
     http.patch(`/chat/conversations/${convId}`, { model_config_id: modelConfigId }).then((r) => r.data),
   remove: (convId: number) => http.delete(`/chat/conversations/${convId}`).then((r) => r.data),
   usage: (convId: number) => http.get<UsageTotals>(`/chat/conversations/${convId}/usage`).then((r) => r.data),
+  /** 上下文占用（圆形进度环）：与后端压缩阈值同源 */
+  context: (convId: number) =>
+    http.get<ContextStats>(`/chat/conversations/${convId}/context`).then((r) => r.data),
   uploadAttachment: (file: File, opts: { kind?: string; kbId?: number } = {}) => {
     const fd = new FormData()
     fd.append('file', file)
@@ -363,6 +386,8 @@ export interface StreamHandlers {
   onToolResult?: (evt: ToolResultEvt) => void
   onPendingAction?: (evt: PendingActionEvt) => void
   onCitationCheck?: (evt: { warning: string; has_fake_cite: boolean }) => void
+  /** 每轮回答结束时的上下文占用快照（驱动输入框圆形进度环） */
+  onContext?: (stats: ContextStats) => void
 }
 
 export interface ToolCallEvt {
@@ -455,6 +480,7 @@ function dispatchEvent(event: string, data: any, handlers: StreamHandlers) {
   else if (event === 'tool_result') handlers.onToolResult?.(data)
   else if (event === 'pending_action') handlers.onPendingAction?.(data)
   else if (event === 'citation_check') handlers.onCitationCheck?.(data)
+  else if (event === 'context') handlers.onContext?.(data as ContextStats)
 }
 
 /** HITL：确认/拒绝 AI 写操作；后续事件复用同一套 handler（续跑到原消息） */
@@ -1474,6 +1500,93 @@ export const settingsApi = {
   get: () => http.get<{ groups: { key: string; label: string }[]; fields: SettingField[] }>('/system/settings').then((r) => r.data),
   update: (updates: Record<string, any>) => http.put<{ message: string; restart_required: boolean; changed: string[] }>('/system/settings', { updates }).then((r) => r.data),
   restart: () => http.post<{ message: string }>('/system/settings/restart').then((r) => r.data),
+}
+
+// ---------------- 浏览器管理 ----------------
+/** 「本机没有任何可用浏览器」时的安装引导（对应 browser_manager.missing_browser_guide） */
+export interface BrowserInstallOption {
+  kind: 'bundled' | 'system'
+  recommended: boolean
+  title: string
+  detail: string
+  route?: string
+  query?: Record<string, string>
+  requires_permission?: string
+  links?: { name: string; url: string }[]
+}
+export interface BrowserInstallGuide {
+  title: string
+  summary: string
+  options: BrowserInstallOption[]
+}
+
+export interface BrowserStatus {
+  running: boolean
+  managed: boolean
+  pid: number | null
+  port: number
+  port_ready: boolean
+  profile_dir: string
+  started_at: number | null
+  error: string | null
+  bundled_installed?: boolean
+  browsers: { name: string; family: string; path: string; source?: 'bundled' | 'system' }[]
+  /** 一个浏览器都没检测到（前端据此直接展示安装引导，而不是等点「启动」才报错） */
+  no_browser?: boolean
+  install_guide?: BrowserInstallGuide | null
+  message?: string
+}
+export const browserApi = {
+  status: () => http.get<BrowserStatus>('/browser/status').then((r) => r.data),
+  launch: (params: { executable?: string; port?: number; headless?: boolean }) =>
+    http.post<BrowserStatus>('/browser/launch', null, { params }).then((r) => r.data),
+  stop: () => http.post<BrowserStatus>('/browser/stop').then((r) => r.data),
+}
+
+// ---------------- 可选组件（浏览器运行时等，用户点按安装） ----------------
+export interface ComponentProgress {
+  phase: 'idle' | 'downloading' | 'verifying' | 'extracting' | 'done' | 'failed'
+  received: number
+  total: number
+  error: string | null
+  actual_sha256: string | null
+  updated_at: number | null
+  installed?: boolean
+  executable?: string | null
+}
+export interface ComponentStatus {
+  key: string
+  name: string
+  summary: string
+  detail: string
+  version: string
+  platform: string
+  supported: boolean
+  hash_pinned?: boolean
+  requires_gui: boolean
+  hint: string
+  installed: boolean
+  installed_version: string | null
+  install_path: string | null
+  executable: string | null
+  size_bytes: number | null
+  verified: boolean
+  source: string | null
+  installed_at: number | null
+  progress: ComponentProgress
+}
+export const componentApi = {
+  list: () => http.get<ComponentStatus[]>('/components').then((r) => r.data),
+  status: (key: string) => http.get<ComponentStatus>(`/components/${key}`).then((r) => r.data),
+  install: (key: string, body: { source: 'official' | 'url'; url?: string }) =>
+    http.post<{ started: boolean; reason?: string }>(`/components/${key}/install`, body).then((r) => r.data),
+  installUpload: (key: string, file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return http.post<{ started: boolean; reason?: string }>(`/components/${key}/install-upload`, fd).then((r) => r.data)
+  },
+  progress: (key: string) => http.get<ComponentProgress>(`/components/${key}/progress`).then((r) => r.data),
+  remove: (key: string) => http.delete(`/components/${key}`).then((r) => r.data),
 }
 
 export interface UpdateAsset { name: string; size: number; digest?: string | null; url: string }

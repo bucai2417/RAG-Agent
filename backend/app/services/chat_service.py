@@ -575,7 +575,7 @@ async def _stream_answer_locked(
     )
     await db.commit()
     # 异步触发上下文压缩（不阻塞响应）
-    _schedule_compress(conversation.id, history)
+    await _schedule_compress(conversation.id)
 
     # 引用一致性校验（防幻觉：检测编造的引用编号）
     try:
@@ -588,17 +588,30 @@ async def _stream_answer_locked(
         pass
 
     yield {"type": "usage", "usage": norm, "latency_ms": latency}
+    # 上下文占用快照：前端据此刷新输入框旁的圆形进度环（压缩是异步任务，
+    # 这里给的是"刚发完这一轮"的即时占用；压缩完成后前端再拉一次即可看到回落）
+    try:
+        from app.services.context_service import context_stats
+
+        yield {"type": "context", **(await context_stats(db, conversation))}
+    except Exception:  # noqa: BLE001
+        pass
     yield {"type": "done", "message_id": asst.id}
 
 
-def _schedule_compress(conversation_id: int, history: list[ChatMessage]) -> None:
+async def _schedule_compress(conversation_id: int) -> None:
+    """落库后异步触发上下文压缩（不阻塞响应）。
+
+    这里不再用本次请求的历史窗口做预判：那个窗口是裁过的最近 N 条，长度恒定，
+    判不出整段会话是否超限（旧实现因此永不触发）。阈值判断统一由
+    maybe_compress 在独立 session 里读全量历史完成，未超限会立即返回。
+    另注意 submit 是协程，必须 await，否则协程根本不会执行。
+    """
     try:
-        from app.services.context_service import THRESHOLD_TOKENS, _compress_job
-        from app.services.token_est import estimate_messages
+        from app.services.context_service import _compress_job
         from app.tasks.queue import submit
 
-        if estimate_messages(history) + 200 >= THRESHOLD_TOKENS:
-            submit(f"compress:{conversation_id}", lambda: _compress_job(conversation_id))
+        await submit(f"compress:{conversation_id}", lambda: _compress_job(conversation_id))
     except Exception:  # noqa: BLE001
         logger.exception("schedule_compress_failed")
 
@@ -802,6 +815,13 @@ async def _resume_answer_locked(
     conv.message_count = (conv.message_count or 0) + 1
     await db.commit()
     yield {"type": "usage", "usage": norm, "latency_ms": latency}
+    # 续跑同样要回传上下文占用：HITL 确认后历史又长了一轮，环口需即时更新
+    try:
+        from app.services.context_service import context_stats
+
+        yield {"type": "context", **(await context_stats(db, conv))}
+    except Exception:  # noqa: BLE001
+        pass
     yield {"type": "done", "message_id": asst.id}
 
 

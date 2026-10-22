@@ -21,6 +21,8 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TEST_DB.as_posix()}"
 os.environ["STORAGE_LOCAL_DIR"] = str(BACKEND_DIR / "data" / "test_files")
 # 独立技能包目录：否则技能包导入测试会把解压目录写进真实 data/skills（造成大量孤儿包）
 os.environ["SKILL_PACK_DIR"] = str(BACKEND_DIR / "data" / "test_skills")
+# 独立组件目录：否则可选组件安装测试会把浏览器包解压进真实 data/components
+os.environ["COMPONENT_DIR"] = str(BACKEND_DIR / "data" / "test_components")
 os.environ["EMBEDDING_DIM"] = "64"
 os.environ["TASK_BACKEND"] = "memory"
 

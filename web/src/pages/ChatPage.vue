@@ -103,9 +103,7 @@
           </el-select>
 
           <div class="cb-right">
-            <el-tooltip content="参数设置（温度等）" placement="top">
-              <el-button size="small" :type="showParams ? 'primary' : 'text'" :icon="Setting" @click="showParams = !showParams" />
-            </el-tooltip>
+            <!-- 参数设置（温度）按钮移入输入框工具栏，这里不再重复放一个 -->
             <el-tooltip v-if="msgs.length >= 4" content="对话目录" placement="top">
               <el-button size="small" text :icon="List" @click="outlineOpen = true" />
             </el-tooltip>
@@ -137,8 +135,10 @@
         </div>
 
         <div v-if="showParams" class="param-bar">
-          <span>温度：{{ temperature }}</span>
+          <span>温度</span>
           <el-slider v-model="temperature" :min="0" :max="1" :step="0.1" style="width: 180px" />
+          <span class="param-val">{{ temperature }}</span>
+          <span class="param-tip">越低越稳定、越高越发散</span>
         </div>
 
         <!-- 消息列表 + 右侧迷你时间轴 -->
@@ -170,7 +170,12 @@
             </div>
             <div class="msg-card">
               <!-- 思考过程 -->
-              <ReasoningBlock v-if="m.role === 'assistant'" :reasoning="m.reasoning" :streaming="m.streaming" />
+              <ReasoningBlock
+                v-if="m.role === 'assistant'"
+                :reasoning="m.reasoning"
+                :streaming="m.streaming"
+                :duration-ms="(m as any).reasoningMs"
+              />
               <!-- 工具调用步骤 -->
               <ToolSteps v-if="m.role === 'assistant' && (m.steps || []).length" :steps="(m.steps as any)" />
               <!-- 正文 -->
@@ -212,25 +217,27 @@
                 </div>
               </div>
 
-              <!-- 操作条 -->
+              <!-- 操作条：悬浮显示，不常驻占位 -->
               <div v-if="m.role === 'assistant' && !m.streaming && m.content" class="msg-actions">
-                <el-tooltip content="复制" placement="top">
-                  <el-button size="small" text :icon="DocumentCopy" @click="copy(m.content)" />
-                </el-tooltip>
-                <el-tooltip content="重新生成" placement="top">
-                  <el-button size="small" text :icon="RefreshRight" @click="regenerate" />
-                </el-tooltip>
-                <el-tooltip content="有帮助" placement="top">
-                  <el-button size="small" text :icon="Select" :style="m.feedback === 1 ? 'color:#10b981' : ''" @click="doFeedback(i, 1)" />
-                </el-tooltip>
-                <el-tooltip content="没帮助" placement="top">
-                  <el-button size="small" text :icon="CloseBold" :style="m.feedback === -1 ? 'color:#ef4444' : ''" @click="doFeedback(i, -1)" />
-                </el-tooltip>
-                <span v-if="m.usage" class="usage-inline">
-                  ↑{{ m.usage.prompt_tokens ?? 0 }} ↓{{ m.usage.completion_tokens ?? 0 }} · {{ m.usage.total_tokens ?? 0 }} tokens
-                  <template v-if="(m.usage.cached_tokens ?? 0) > 0"> · 缓存 {{ m.usage.cached_tokens }}</template>
-                  <template v-if="m.model"> · {{ m.model }}</template>
-                </span>
+                <div class="msg-actions-inner">
+                  <el-tooltip content="复制" placement="top">
+                    <el-button size="small" text :icon="DocumentCopy" @click="copy(m.content)" />
+                  </el-tooltip>
+                  <el-tooltip content="重新生成" placement="top">
+                    <el-button size="small" text :icon="RefreshRight" @click="regenerate" />
+                  </el-tooltip>
+                  <el-tooltip content="有帮助" placement="top">
+                    <el-button size="small" text :icon="Select" :class="{ 'fb-on': m.feedback === 1 }" @click="doFeedback(i, 1)" />
+                  </el-tooltip>
+                  <el-tooltip content="没帮助" placement="top">
+                    <el-button size="small" text :icon="CloseBold" :class="{ 'fb-off': m.feedback === -1 }" @click="doFeedback(i, -1)" />
+                  </el-tooltip>
+                  <span v-if="m.usage" class="usage-inline">
+                    ↑{{ m.usage.prompt_tokens ?? 0 }} ↓{{ m.usage.completion_tokens ?? 0 }} · {{ m.usage.total_tokens ?? 0 }} tokens
+                    <template v-if="(m.usage.cached_tokens ?? 0) > 0"> · 缓存 {{ m.usage.cached_tokens }}</template>
+                    <template v-if="m.model"> · {{ m.model }}</template>
+                  </span>
+                </div>
               </div>
             </div>
           </div>
@@ -273,26 +280,51 @@
           </el-tag>
         </div>
 
-        <!-- 输入区 -->
-        <div class="composer">
-          <el-tooltip content="上传图片/文档/视频，也可直接把文件拖进来" placement="top">
-            <el-button :icon="Paperclip" @click="pickFile" />
-          </el-tooltip>
-          <input ref="fileRef" type="file" hidden multiple
-            accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.csv,.txt,.md,image/*,video/*" @change="onPick" />
-          <el-select v-if="kbs.length" v-model="docKb" size="small" style="width: 170px" clearable placeholder="文档入库到（可空）">
-            <el-option v-for="k in kbs" :key="k.id" :value="k.id" :label="k.name" />
-          </el-select>
-          <el-input
+        <!-- 输入区：圆角卡片 + 内嵌底部工具栏（发送键收在卡片右下角） -->
+        <div class="composer-wrap">
+          <ChatComposer
             v-model="input"
-            type="textarea"
-            :autosize="{ minRows: 1, maxRows: 4 }"
-            resize="none"
+            :streaming="streaming"
+            :can-send="canSend"
             placeholder="输入问题，Enter 发送，Shift+Enter 换行"
-            @keydown.enter.exact.prevent="send"
-          />
-          <el-button v-if="streaming" type="danger" :icon="SwitchButton" @click="stop">停止</el-button>
-          <el-button v-else type="primary" :icon="Promotion" @click="send">发送</el-button>
+            @send="send"
+            @stop="stop"
+          >
+            <template #left>
+              <el-tooltip content="上传图片/文档/视频，也可直接把文件拖进来" placement="top">
+                <button type="button" class="cp-btn" @click="pickFile">
+                  <el-icon><Paperclip /></el-icon>
+                </button>
+              </el-tooltip>
+              <input ref="fileRef" type="file" hidden multiple
+                accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.csv,.txt,.md,image/*,video/*" @change="onPick" />
+              <el-select
+                v-if="kbs.length"
+                v-model="docKb"
+                size="small"
+                class="cp-kb"
+                clearable
+                placeholder="文档入库到（可空）"
+              >
+                <el-option v-for="k in kbs" :key="k.id" :value="k.id" :label="k.name" />
+              </el-select>
+            </template>
+            <template #context>
+              <ContextRing
+                :stats="ctxStats"
+                :has-conv="!!convId"
+                :compressing="!!ctxStats?.compressing"
+                @refresh="refreshContext"
+              />
+            </template>
+            <template #right>
+              <el-tooltip content="参数设置（温度等）" placement="top">
+                <button type="button" class="cp-btn" :class="{ on: showParams }" @click="showParams = !showParams">
+                  <el-icon><Setting /></el-icon>
+                </button>
+              </el-tooltip>
+            </template>
+          </ChatComposer>
         </div>
       </section>
     </div>
@@ -319,12 +351,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Plus, MoreFilled, Edit, Delete, Setting, List, Tools, Paperclip, Promotion,
-  SwitchButton, DocumentCopy, RefreshRight, Select, CloseBold, ArrowDown, Loading,
+  Plus, MoreFilled, Edit, Delete, Setting, List, Tools, Paperclip,
+  DocumentCopy, RefreshRight, Select, CloseBold, ArrowDown, Loading,
   UploadFilled,
 } from '@element-plus/icons-vue'
 import MarkdownBody from '@/components/MarkdownBody.vue'
@@ -334,9 +366,11 @@ import ToolSteps from '@/components/ToolSteps.vue'
 import MessageTimeline from '@/components/MessageTimeline.vue'
 import PendingActionCard from '@/components/PendingActionCard.vue'
 import PendingAttachmentProgress from '@/components/PendingAttachmentProgress.vue'
+import ChatComposer from '@/components/ChatComposer.vue'
+import ContextRing from '@/components/ContextRing.vue'
 import {
   chatApi, confirmToolAction, docApi, kbApi, providerApi, streamChat, usageApi,
-  type Attachment, type ArtifactRef, type Citation, type Conversation, type KB,
+  type Attachment, type ArtifactRef, type Citation, type ContextStats, type Conversation, type KB,
   type Message, type ModelConfig, type PendingActionEvt, type StreamHandlers, type UsageTotals,
 } from '@/api'
 import { errMsg } from '@/api/http'
@@ -354,6 +388,8 @@ interface Msg {
   model?: string
   feedback?: number | null
   streaming?: boolean
+  /** 思考耗时（ms），流式结束后用于折叠成「思考了 N 秒」 */
+  reasoningMs?: number
   steps?: { call: any; result?: any }[]
   pending?: PendingActionEvt
   pendingResolved?: boolean
@@ -381,6 +417,9 @@ const docKb = ref<number>()
 const todayUsage = ref<UsageTotals | null>(null)
 const convUsage = ref<UsageTotals | null>(null)
 const convSummary = ref<string | null>(null)
+/** 上下文占用（输入框圆环）：随每轮回答的 context 事件刷新，切会话时重拉 */
+const ctxStats = ref<ContextStats | null>(null)
+let ctxTimer: ReturnType<typeof setTimeout> | null = null
 const fileRef = ref<HTMLInputElement>()
 const scrollRef = ref<any>(null)
 const showJump = ref(false)
@@ -408,6 +447,8 @@ let draftMovedTo: string | null = null
 const curKey = computed(() => (convId.value != null ? String(convId.value) : DRAFT))
 const msgs = computed(() => convMsgs.value[curKey.value] || [])
 const streaming = computed(() => streamingKeys.value.has(curKey.value))
+/** 有正文或只有附件都可以发；纯空白且无附件时禁用发送键 */
+const canSend = computed(() => !!input.value.trim() || pendingAtts.value.length > 0)
 const abortMap = new Map<string, AbortController>()
 
 // 时间轴条目（每轮）
@@ -498,6 +539,35 @@ async function refreshUsage() {
   } else convUsage.value = null
 }
 
+/**
+ * 拉取上下文占用。压缩是后台异步任务，刚发完时指标可能还处在高位，
+ * 所以 afterMs 内再补拉一次，让圆环能自己回落到压缩后的水位。
+ */
+async function refreshContext(afterMs = 0) {
+  const cid = convId.value
+  if (!cid) {
+    ctxStats.value = null
+    return
+  }
+  if (ctxTimer) {
+    clearTimeout(ctxTimer)
+    ctxTimer = null
+  }
+  try {
+    const s = await chatApi.context(cid)
+    // 期间可能已切到别的会话，丢弃过期结果
+    if (convId.value === cid) ctxStats.value = s
+  } catch {
+    /* ignore */
+  }
+  if (afterMs) {
+    ctxTimer = setTimeout(() => {
+      ctxTimer = null
+      if (convId.value === cid) refreshContext()
+    }, afterMs)
+  }
+}
+
 function onRetrievalChange(v: any) {
   localStorage.setItem('chat_retrieval_mode', v)
 }
@@ -524,6 +594,7 @@ async function openConversation(id: number) {
   const c = convs.value.find((x) => x.id === id)
   if (c?.model_config_id) modelId.value = c.model_config_id
   convSummary.value = c?.summary || null
+  refreshContext()
   scrollToBottom()
 }
 
@@ -577,6 +648,12 @@ function newConversation() {
   convMsgs.value = { ...convMsgs.value, [DRAFT]: [] }
   pendingAtts.value = []
   convUsage.value = null
+  // 草稿态没有会话 id，圆环归零（组件会提示"发第一条后开始统计"）
+  ctxStats.value = null
+  if (ctxTimer) {
+    clearTimeout(ctxTimer)
+    ctxTimer = null
+  }
 }
 
 async function changeModel(id: number) {
@@ -722,6 +799,7 @@ async function send() {
   const atts = pendingAtts.value
   pendingAtts.value = []
   const startKey = curKey.value
+  const startedAt = performance.now()
   convMsgs.value = {
     ...convMsgs.value,
     [startKey]: [
@@ -751,7 +829,19 @@ async function send() {
       if (evt.has_fake_cite) ElMessage.warning(evt.warning)
     },
     onUsage: (u) => patchLast(startKey, (m) => ({ ...m, usage: u })),
-    onDone: (mid) => patchLast(startKey, (m) => ({ ...m, id: mid, streaming: false })),
+    // 上下文快照：先按即时值刷新圆环，2.5s 后再拉一次——
+    // 后台压缩是异步的，补拉才能看到环口从高位回落到压缩后的水位
+    onContext: (s) => {
+      ctxStats.value = s
+      convSummary.value = s.compressed ? convSummary.value : null
+      if (s.percent >= 70 || s.compressing) refreshContext(2500)
+    },
+    // 记录思考耗时，供 ReasoningBlock 折叠成「思考了 N 秒」
+    onDone: (mid) =>
+      patchLast(startKey, (m) => ({
+        ...m, id: mid, streaming: false,
+        reasoningMs: m.reasoning ? Math.round(performance.now() - startedAt) : undefined,
+      })),
     onError: (msg) => ElMessage.error(msg),
   }
   await runStream(
@@ -786,7 +876,11 @@ async function runStream(payload: any, handlers: any, url?: string, key: string 
     setStreamingKey(key, false)
     refreshUsage()
     const cid = Number(key)
-    if (Number.isFinite(cid) && key !== DRAFT) refreshLastAssistant(cid)
+    if (Number.isFinite(cid) && key !== DRAFT) {
+      refreshLastAssistant(cid)
+      // 兜底：流被中断（用户点停止）时可能收不到 context 事件
+      if (!ctxStats.value) refreshContext()
+    }
   }
 }
 
@@ -835,6 +929,10 @@ async function confirmAction(idx: number, actionId: number, decision: 'approve' 
       onReasoning: (t) => patchAt(key, idx, (m) => ({ ...m, reasoning: (m.reasoning || '') + t })),
       onCitations: (cit) => patchAt(key, idx, (m) => ({ ...m, citations: cit })),
       onPendingAction: (p) => patchAt(key, idx, (m) => ({ ...m, pending: p, pendingResolved: false, streaming: false })),
+      onContext: (s) => {
+        ctxStats.value = s
+        if (s.percent >= 70 || s.compressing) refreshContext(2500)
+      },
       onDone: (mid) => patchAt(key, idx, (m) => ({ ...m, id: mid, streaming: false, pending: undefined })),
       onError: (msg) => ElMessage.error(msg),
     })
@@ -944,6 +1042,11 @@ onMounted(async () => {
   const q = route.query.conv
   if (q) await openConversation(Number(q))
 })
+
+onBeforeUnmount(() => {
+  // 离开页面：清掉上下文补拉定时器，避免对已卸载组件写 ref
+  if (ctxTimer) clearTimeout(ctxTimer)
+})
 </script>
 
 <style scoped>
@@ -1002,7 +1105,9 @@ onMounted(async () => {
 .tp-title { font-size: 13px; font-weight: 500; color: var(--text-title); }
 .tp-desc { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
 
-.param-bar { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); font-size: 13px; color: var(--text-secondary); }
+.param-bar { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--border-subtle); font-size: 13px; color: var(--text-secondary); }
+.param-val { font-variant-numeric: tabular-nums; color: var(--text-title); font-weight: 500; }
+.param-tip { font-size: 12px; color: var(--text-muted); }
 
 .msg-area { position: relative; flex: 1; min-height: 0; display: flex; }
 .msg-scroll { flex: 1; min-width: 0; min-height: 0; padding: 18px 20px; }
@@ -1025,7 +1130,7 @@ onMounted(async () => {
 .ce-chip:hover { border-color: var(--color-primary-border); background: var(--color-primary-subtle); color: var(--brand-700); }
 
 /* 消息 */
-.msg { display: flex; gap: 12px; margin-bottom: 18px; border-radius: 8px; padding: 2px; transition: background 0.3s; }
+.msg { display: flex; gap: 12px; margin-bottom: 28px; border-radius: 8px; padding: 2px; transition: background 0.3s; }
 .msg.user { flex-direction: row-reverse; }
 .msg.hl { background: var(--warn-soft); padding: 8px; }
 .msg-avatar { flex: 0 0 auto; padding-top: 2px; }
@@ -1053,8 +1158,30 @@ onMounted(async () => {
 .cite-tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .cite-tag { cursor: pointer; }
 
-.msg-actions { margin-top: 8px; border-top: 1px solid var(--border-subtle); padding-top: 6px; display: flex; align-items: center; gap: 2px; flex-wrap: wrap; }
-.usage-inline { font-size: 12px; color: var(--text-muted); margin-left: 6px; }
+/* 操作条：悬浮在消息卡片底部，默认透明，hover/聚焦时出现。
+   用 absolute 而非占位，避免每条回答底下都留一条空白。 */
+.msg-card { position: relative; }
+.msg-actions {
+  position: absolute; right: 8px; bottom: -14px;
+  opacity: 0; pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  z-index: 5;
+}
+.msg:hover .msg-actions,
+.msg-actions:focus-within { opacity: 1; pointer-events: auto; transform: translateY(0); }
+/* 触屏/无 hover 环境：始终显示，否则点不到 */
+@media (hover: none) { .msg-actions { opacity: 1; pointer-events: auto; transform: none; } }
+
+.msg-actions-inner {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px 4px; border-radius: 999px;
+  background: var(--bg-surface); border: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+.msg-actions-inner .fb-on { color: #10b981; }
+.msg-actions-inner .fb-off { color: #ef4444; }
+.usage-inline { font-size: 12px; color: var(--text-muted); margin-left: 6px; padding-right: 4px; }
 
 /* 回到最新 */
 .jump-latest {
@@ -1073,12 +1200,25 @@ onMounted(async () => {
 .usage-bar b { color: var(--text-body); }
 .usage-right { margin-left: auto; }
 
-.pending-atts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; flex-shrink: 0; }
+.pending-atts { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 16px 0; flex-shrink: 0; }
 
-/* 输入区 */
-.composer { display: flex; gap: 8px; align-items: flex-end; padding: 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
-.composer :deep(.el-textarea__inner) { font-size: 14px; }
-.composer :deep(.el-button) { flex-shrink: 0; }
+/* 输入区：卡片自带边框与圆角，外层只负责留白，不再画分隔线 */
+.composer-wrap { padding: 10px 16px 12px; flex-shrink: 0; }
+
+/* 工具栏里的图标按钮（附件、参数等）：无边框方形，hover 才出底色 */
+.cp-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; flex-shrink: 0;
+  border: none; border-radius: 9px; background: transparent;
+  color: var(--text-secondary); font-size: 16px; cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.cp-btn:hover { background: var(--bg-muted); color: var(--color-primary); }
+.cp-btn.on { background: var(--color-primary-subtle); color: var(--color-primary); }
+
+/* 知识库选择器：工具栏内固定宽度，不撑满整行 */
+.cp-kb { width: 168px; flex: 0 0 auto; }
+.cp-kb :deep(.el-select__wrapper) { min-height: 26px; border-radius: 9px; }
 
 /* 引用抽屉 */
 .dp-label { font-size: 12px; color: var(--text-secondary); }

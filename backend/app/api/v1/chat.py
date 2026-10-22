@@ -208,6 +208,23 @@ async def list_messages(
     return out
 
 
+@router.get("/conversations/{conv_id}/context")
+async def conversation_context(
+    conv_id: int,
+    user: User = Depends(require_permission("chat:use")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """当前会话的上下文占用快照（输入框圆形进度环的数据源）。
+
+    与后端真正触发压缩的判断同源：used_tokens 就是"摘要 + 水位后原文历史"的估计值，
+    limit_tokens 就是 system_setting 里的压缩阈值。
+    """
+    from app.services.context_service import context_stats
+
+    conv = await _assert_conv_access(db, conv_id, user)
+    return await context_stats(db, conv)
+
+
 @router.get("/conversations/{conv_id}/usage")
 async def conversation_usage(
     conv_id: int,
@@ -682,7 +699,8 @@ async def chat_tool_confirm(
             action.status = "executed"
             action.result = {"content": result.content[:2000], "is_error": result.is_error}
             await db.commit()
-            yield f"event: tool_result\ndata: {json.dumps({'id': f'action-{action.id}', 'name': tool.name, 'content': result.content[:4000], 'is_error': result.is_error}, ensure_ascii=False)}\n\n"
+            # data 一并下发：前端靠它渲染结构化提示（如「本机没装浏览器 → 去哪装」的引导卡片）
+            yield f"event: tool_result\ndata: {json.dumps({'id': f'action-{action.id}', 'name': tool.name, 'content': result.content[:4000], 'is_error': result.is_error, 'data': result.data}, ensure_ascii=False)}\n\n"
             yield f"event: action_resolved\ndata: {json.dumps({'action_id': action.id, 'decision': 'approve', 'ok': True, 'result': result.content[:500]}, ensure_ascii=False)}\n\n"
         except Exception as e:  # noqa: BLE001
             action.status = "failed"
