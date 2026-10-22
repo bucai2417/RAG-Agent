@@ -15,7 +15,7 @@ import time
 
 from sqlalchemy import select
 
-from app.agents.tools.base import ToolContext, ToolResult
+from app.agents.tools.base import ToolContext, ToolResult, WriteToolMixin
 
 
 def _slugify(name: str) -> str:
@@ -156,18 +156,9 @@ class ListAgentsTool:
 
 
 # ==================== write 类（HITL）====================
-class _WriteToolMixin:
-    kind = "write"
-
-    def summarize(self, args: dict) -> str:  # noqa: D401
-        return f"将调用 {self.name}"
-
-    async def run(self, args: dict, ctx: ToolContext) -> ToolResult:
-        """统一入口：write 工具经确认后由 run 调用 execute。"""
-        return await self.execute(args, ctx)
-
-    async def execute(self, args: dict, ctx: ToolContext) -> ToolResult:
-        raise NotImplementedError
+# 统一复用 base.WriteToolMixin（run 转发 execute、summarize 供确认卡片），
+# 本文件不再自带副本，避免多处实现漂移。
+_WriteToolMixin = WriteToolMixin
 
 
 class CreateSkillTool(_WriteToolMixin):

@@ -150,51 +150,110 @@ async def init_models_for(engine) -> list[str]:
     return [t.name for t in Base.metadata.sorted_tables]
 
 
+# 历史遗留 NULL 回填只用扫描一次的标记（见 _sync_missing_columns）
+_BACKFILL_MARKER_KEY = "legacy_null_backfill_done"
+
+
 def _sync_missing_columns(sync_conn) -> None:
     """对比 ORM 定义与现有表结构，补齐缺失列（仅 SQLite/简单场景）。
 
     关键：ADD COLUMN 必须带上 DEFAULT，否则存量行新列为 NULL，会导致
-    「列非空但值为 None」的响应校验 500（如 Document.kind）。加列后再回填一次，
-    保证已有行也有值。
+    「列非空但值为 None」的响应校验 500（如 Document.kind）。
+
+    性能约束：这里在**每次启动**都会跑。早期实现对每个非空且带标量默认值的列
+    都发一次 `_`WHERE col IS NULL`_` 全表 UPDATE（本项目 69 张表共 242 条），
+    无索引时是全表扫描，数据量一大启动就会越来越慢。现在改为：
+    - 只在本次真的新建了列时回填该列（新列由 DDL 的 DEFAULT 覆盖，几乎不会命中）；
+    - 老版本加列未带 DEFAULT 造成的遗留 NULL，用一次性标记控制，只扫一遍。
     """
     from sqlalchemy import inspect, text
 
     inspector = inspect(sync_conn)
     existing_tables = set(inspector.get_table_names())
+    added_columns: list = []
+
     for table in Base.metadata.sorted_tables:
         if table.name not in existing_tables:
             continue
         cols = {c["name"] for c in inspector.get_columns(table.name)}
         for col in table.columns:
-            if col.name not in cols:
-                # 生成 ALTER TABLE ADD COLUMN（类型用 SQLite 兼容写法）
-                coltype = col.type.compile(dialect=sync_conn.dialect)
-                ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {coltype}'
-                # 标量默认值：让存量行立即有值，避免 NULL
-                default_literal = _scalar_default(col)
-                if default_literal is not None:
-                    ddl += f" DEFAULT {default_literal}"
-                try:
-                    sync_conn.execute(text(ddl))
-                except Exception:  # noqa: BLE001
-                    pass  # 已有列 / 不支持的类型，忽略
-                    continue
-            # 回填：仅针对「非空列却存在 NULL」的存量行（ADD COLUMN 的 DEFAULT 不会改写
-            # 已有 NULL 行；老版本加列时未带 DEFAULT 也会留下 NULL）。可空列不动，避免误改。
-            if col.nullable or col.default is None:
+            if col.name in cols:
                 continue
+            # 生成 ALTER TABLE ADD COLUMN（类型用 SQLite 兼容写法）
+            coltype = col.type.compile(dialect=sync_conn.dialect)
+            ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {coltype}'
+            # 标量默认值：让存量行立即有值，避免 NULL
             default_literal = _scalar_default(col)
-            if default_literal is None:
-                continue
+            if default_literal is not None:
+                ddl += f" DEFAULT {default_literal}"
             try:
-                sync_conn.execute(
-                    text(
-                        f'UPDATE "{table.name}" SET "{col.name}" = {default_literal} '
-                        f'WHERE "{col.name}" IS NULL'
-                    )
-                )
+                sync_conn.execute(text(ddl))
+                added_columns.append(col)
             except Exception:  # noqa: BLE001
-                pass
+                pass  # 已有列 / 不支持的类型，忽略
+
+    # 1) 本次新增的列：SQLite 的 ADD COLUMN ... DEFAULT 会给存量行填上默认值，
+    #    这里只兜底处理「默认值不是标量」（当时 DDL 没带 DEFAULT）的情况。
+    for col in added_columns:
+        _backfill_nulls(sync_conn, col, text)
+
+    # 2) 历史遗留：老版本加列未带 DEFAULT，存量行为 NULL。只扫一次。
+    _backfill_legacy_nulls_once(sync_conn, text)
+
+
+def _backfill_nulls(sync_conn, col, text_mod) -> None:
+    """把某列的非空 NULL 行回填为标量默认值（可空列不动，避免误改）。"""
+    if col.nullable or col.default is None:
+        return
+    default_literal = _scalar_default(col)
+    if default_literal is None:
+        return
+    try:
+        sync_conn.execute(
+            text_mod(
+                f'UPDATE "{col.table.name}" SET "{col.name}" = {default_literal} '
+                f'WHERE "{col.name}" IS NULL'
+            )
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _backfill_legacy_nulls_once(sync_conn, text_mod) -> None:
+    """对老库做一次全量 NULL 回填，并用内部标记表记录，避免每次启动重复扫描。
+
+    标记表刻意独立于 ORM 模型（`Base.metadata` 里没有它），因此不受迁移逻辑影响。
+    """
+    try:
+        sync_conn.execute(
+            text_mod(
+                "CREATE TABLE IF NOT EXISTS schema_meta ("
+                "  key TEXT PRIMARY KEY,"
+                "  value TEXT"
+                ")"
+            )
+        )
+        done = sync_conn.execute(
+            text_mod(f"SELECT value FROM schema_meta WHERE key = '{_BACKFILL_MARKER_KEY}'")
+        ).scalar()
+        if done:
+            return
+    except Exception:  # noqa: BLE001
+        return
+
+    for table in Base.metadata.sorted_tables:
+        for col in table.columns:
+            _backfill_nulls(sync_conn, col, text_mod)
+
+    try:
+        sync_conn.execute(
+            text_mod(
+                "INSERT OR REPLACE INTO schema_meta (key, value) "
+                f"VALUES ('{_BACKFILL_MARKER_KEY}', '1')"
+            )
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _scalar_default(col) -> str | None:

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from app.agents.tools.base import ToolContext, ToolResult
+from app.agents.tools.base import ToolContext, ToolResult, WriteToolMixin
 from app.ingest.storage import get_storage
 
 # 支持的文本抽取目标
@@ -358,17 +358,10 @@ def _strip_markdown(text: str) -> str:
 
 
 # ==================== write 类（HITL）====================
-class _WriteToolMixin:
-    kind = "write"
-
-    def summarize(self, args: dict) -> str:
-        return f"将调用 {self.name}"
-
-    async def run(self, args: dict, ctx: ToolContext) -> ToolResult:
-        return await self.execute(args, ctx)
-
-    async def execute(self, args: dict, ctx: ToolContext) -> ToolResult:
-        raise NotImplementedError
+# 统一用 base.WriteToolMixin：本文件不再自带一份实现。
+# 曾因各处重复定义 mixin，导致「同一逻辑三份副本、其中一处漏改」这类问题；
+# tests/test_tool_contract.py 会校验所有写工具都继承 base 中的那一个。
+_WriteToolMixin = WriteToolMixin
 
 
 class GenerateFileTool(_WriteToolMixin):
