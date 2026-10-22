@@ -67,6 +67,18 @@ from app.agents.tools.office_tools import OFFICE_TOOLS  # noqa: E402
 for _ot in OFFICE_TOOLS:
     registry.register(_ot)
 
+# 办公文档结构化读写（按元素地址精确定位与编辑）
+from app.agents.tools.office_struct_tools import OFFICE_STRUCT_TOOLS  # noqa: E402
+
+for _ost in OFFICE_STRUCT_TOOLS:
+    registry.register(_ost)
+
+# 浏览器控制（CDP 直连本机调试端口，复用已登录会话）
+from app.agents.tools.browser_tools import BROWSER_TOOLS  # noqa: E402
+
+for _bt in BROWSER_TOOLS:
+    registry.register(_bt)
+
 # 用户级个人工具（待办提醒 / 我的会话）：高频，常驻下发，无需 find_tools 两跳
 from app.agents.tools.complement_tools import PERSONAL_TOOLS  # noqa: E402
 

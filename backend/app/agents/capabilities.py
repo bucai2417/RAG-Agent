@@ -70,6 +70,11 @@ def build_tool_hint(is_admin: bool = False) -> str:
         "常见：知识库检索 knowledge_retrieval；读写/生成文件 generate_file/read_file；"
         "表格统计 analyze_table；生成正式文档 generate_office_doc；个人待办 manage_reminder；"
         "个人邮箱 manage_mail（收发自己的邮件）；管理自己的会话 manage_conversation。"
+        "**要按「第几段/某单元格」精确读写 docx/xlsx/pptx/pdf 时**，"
+        "先用 read_doc_structure 拿到可寻址元素（address），再用 edit_doc_structure 按地址改写"
+        "（它会另存新文件，不改原件）；只概括全文用 read_file 更省 token。"
+        "**需要登录态或 JS 渲染的网页**用浏览器工具：browser_tabs / browser_read / "
+        "browser_action（点击、填表、截图、跳转）；公开网页优先 http_request 更省资源。"
     )
     if is_admin:
         base += (

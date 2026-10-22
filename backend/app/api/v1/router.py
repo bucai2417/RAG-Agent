@@ -5,11 +5,13 @@ from app.api.v1 import (
     agents,
     apikey,
     audit,
+    browser,
     auth,
     channels,
     changelog,
     chat,
     chat_room,
+    components,
     document,
     email_sources,
     eval as eval_api,
@@ -61,9 +63,11 @@ api_router.include_router(agents.router)
 api_router.include_router(skill_market.router)
 api_router.include_router(skills.router)
 api_router.include_router(tools.router)
+api_router.include_router(components.router)
 api_router.include_router(mcp.router)
 api_router.include_router(workflow.router)
 api_router.include_router(audit.router)
+api_router.include_router(browser.router)
 api_router.include_router(apikey.router)
 api_router.include_router(sso.router)
 api_router.include_router(usage.router)

@@ -243,6 +243,13 @@ async def lifespan(app: FastAPI):
         await mcp_manager.stop_all()
     except Exception:  # noqa: BLE001
         pass
+    # 浏览器子进程清理：只终止由本进程拉起的实例，不动用户自己开的调试浏览器
+    from app.services.browser_manager import cleanup_on_shutdown as browser_cleanup
+
+    try:
+        browser_cleanup()
+    except Exception:  # noqa: BLE001
+        pass
     # 取消并等待在途后台任务（工作流/评测/调度/事件等），防半写与资源泄漏
     from app.tasks.bg import shutdown as bg_shutdown
 

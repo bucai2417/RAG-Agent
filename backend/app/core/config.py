@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     )
     # 应用
     app_name: str = "RAG Knowledge Base"
-    app_version: str = "1.0.1"
+    app_version: str = "1.0.2"
     app_env: str = "prod" if _is_frozen() else "dev"
     debug: bool = not _is_frozen()
     api_prefix: str = "/api/v1"
@@ -125,6 +125,10 @@ class Settings(BaseSettings):
     embedding_fallback_local: bool = True  # 上游 embedding 失败时回退到本地 local_hash（保证入库）
     provider_health_interval_min: int = 30  # Provider 健康检查周期（分钟，0=关闭）
     inject_capabilities_default: bool = True  # 向 AI 注入「平台能力 + 账号权限」摘要
+    # 上下文压缩：会话历史超过阈值时把早期对话摘要进 Conversation.summary，只保留最近 N 条原文。
+    # 输入框右侧的圆形占用环用的就是这个阈值，改这里环口也跟着变。
+    context_compress_threshold: int = 4000   # 触发压缩的 token 阈值（0=用内置默认 4000）
+    context_keep_recent: int = 6             # 压缩后仍以原文保留的最近消息条数（0=用内置默认 6）
     github_token: str = ""  # 搜索技能用（GitHub API Token）；配置后 search 限流 10→30 次/分钟
     # 在线更新检查
     update_check_enabled: bool = True   # 是否允许「检查更新」
@@ -186,6 +190,8 @@ class Settings(BaseSettings):
     storage_local_dir: str = str(DATA_DIR / "files")
     # 技能包解压目录
     skill_pack_dir: str = str(DATA_DIR / "skills")
+    # 可选组件安装目录（浏览器运行时等由用户点按安装的二进制）
+    component_dir: str = str(DATA_DIR / "components")
     # 运行日志落盘（轮转）；空字符串=只输出到 stdout
     log_file: str = str(DATA_DIR / "logs" / "app.log")
     log_max_bytes: int = 10 * 1024 * 1024
@@ -259,6 +265,12 @@ class Settings(BaseSettings):
     @property
     def skill_pack_path(self) -> Path:
         p = Path(self.skill_pack_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    @property
+    def component_path(self) -> Path:
+        p = Path(self.component_dir)
         p.mkdir(parents=True, exist_ok=True)
         return p
 
