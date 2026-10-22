@@ -39,6 +39,7 @@ const router = createRouter({
         { path: 'admin/depts', name: 'admin-depts', component: () => import('@/pages/admin/DeptPage.vue') },
         { path: 'admin/groups', name: 'admin-groups', component: () => import('@/pages/admin/GroupPage.vue') },
         { path: 'admin/settings', name: 'admin-settings', component: () => import('@/pages/admin/SettingsPage.vue') },
+        { path: 'admin/browser', name: 'admin-browser', component: () => import('@/pages/admin/BrowserPage.vue') },
         { path: 'admin/system-ops', name: 'admin-system-ops', component: () => import('@/pages/admin/SystemOpsPage.vue') },
         { path: 'admin/models', name: 'admin-models', component: () => import('@/pages/admin/ModelPage.vue') },
         { path: 'admin/persona-templates', name: 'admin-persona-templates', component: () => import('@/pages/admin/PersonaTemplatePage.vue') },

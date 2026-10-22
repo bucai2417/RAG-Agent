@@ -92,6 +92,7 @@ export const NAV: (NavItem | NavGroup)[] = [
     label: '系统设置',
     children: [
       { key: '/admin/settings', icon: 'Setting', label: '系统设置', perm: 'system:manage' },
+      { key: '/admin/browser', icon: 'Monitor', label: '浏览器', perm: 'tool:invoke' },
       { key: '/admin/system-ops', icon: 'Coin', label: '数据库与运维', perm: 'system:manage' },
       { key: '/admin/api-keys', icon: 'Key', label: 'API 密钥', perm: 'apikey:read' },
       { key: '/admin/sso', icon: 'Lock', label: '单点登录', perm: 'sso:read' },
