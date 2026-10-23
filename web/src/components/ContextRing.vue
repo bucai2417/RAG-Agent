@@ -5,7 +5,7 @@
     - hover 浮层给出实际数字（已用/上限/摘要/折叠条数），而不是含糊的百分比。
     - 无会话（草稿）时只显示空心环，提示"发第一条后开始统计"。
   -->
-  <el-tooltip placement="top" :show-after="120" popper-class="ctx-tip" :disabled="!showTooltip">
+  <el-tooltip placement="top" :show-after="120" effect="light" popper-class="ctx-tip" :disabled="!showTooltip">
     <template #content>
       <div class="ctx-pop">
         <div class="ctx-head">
@@ -168,11 +168,22 @@ function fmt(n: number): string {
 </style>
 
 <style>
-/* 浮层不设 scoped：el-tooltip 的内容挂到 body 上 */
+/* 浮层不设 scoped：el-tooltip 的内容挂到 body 上。
+   显式声明浅色底：effect=light 只改文字色，底色仍走 --el-bg-color-overlay，
+   若全局变量被改成深色主题就会透出深底黑字。这里把底色/边框/文字全部钉死。 */
 .ctx-tip.el-popper {
   padding: 0 !important;
   border-radius: 10px !important;
+  --el-bg-color-overlay: #ffffff;
+  --el-text-color-primary: #0f172a;
+  background: #ffffff !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text-body) !important;
   box-shadow: var(--shadow-floating) !important;
+}
+.ctx-tip.el-popper .el-popper__arrow::before {
+  background: #ffffff !important;
+  border-color: var(--border) !important;
 }
 .ctx-tip .ctx-pop { padding: 10px 12px; min-width: 232px; }
 .ctx-tip .ctx-head {

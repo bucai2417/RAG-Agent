@@ -232,9 +232,9 @@
                   <el-tooltip content="没帮助" placement="top">
                     <el-button size="small" text :icon="CloseBold" :class="{ 'fb-off': m.feedback === -1 }" @click="doFeedback(i, -1)" />
                   </el-tooltip>
-                  <span v-if="m.usage" class="usage-inline">
-                    ↑{{ m.usage.prompt_tokens ?? 0 }} ↓{{ m.usage.completion_tokens ?? 0 }} · {{ m.usage.total_tokens ?? 0 }} tokens
-                    <template v-if="(m.usage.cached_tokens ?? 0) > 0"> · 缓存 {{ m.usage.cached_tokens }}</template>
+                  <span v-if="m.usage" class="usage-inline" :title="usageFull(m)">
+                    ↑{{ compactNum(m.usage.prompt_tokens) }} ↓{{ compactNum(m.usage.completion_tokens) }}
+                    <template v-if="(m.usage.cached_tokens ?? 0) > 0"> · 缓存 {{ compactNum(m.usage.cached_tokens) }}</template>
                     <template v-if="m.model"> · {{ m.model }}</template>
                   </span>
                 </div>
@@ -961,6 +961,27 @@ function copy(text: string) {
   navigator.clipboard?.writeText(text)
   ElMessage.success('已复制')
 }
+
+/** 大数字压缩：16375 -> 16.4k，避免操作条被超长 token 数字撑开 */
+function compactNum(n?: number | null): string {
+  if (!n) return '0'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 10_000) return `${(n / 1000).toFixed(1)}k`
+  return String(n)
+}
+
+/** 悬浮 title：保留完整数字，压缩显示不影响核对 */
+function usageFull(m: any): string {
+  const u = m.usage || {}
+  const parts = [
+    `输入 ${u.prompt_tokens ?? 0} tokens`,
+    `输出 ${u.completion_tokens ?? 0} tokens`,
+    `合计 ${u.total_tokens ?? 0} tokens`,
+  ]
+  if ((u.cached_tokens ?? 0) > 0) parts.push(`命中缓存 ${u.cached_tokens} tokens`)
+  if (m.model) parts.push(u.model ?? m.model)
+  return parts.join(' · ')
+}
 async function doFeedback(idx: number, val: number) {
   const m = msgs.value[idx]
   if (!m.id) {
@@ -1158,11 +1179,14 @@ onBeforeUnmount(() => {
 .cite-tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .cite-tag { cursor: pointer; }
 
-/* 操作条：悬浮在消息卡片底部，默认透明，hover/聚焦时出现。
-   用 absolute 而非占位，避免每条回答底下都留一条空白。 */
+/* 操作条：悬浮在消息卡片下沿之外，默认透明，hover/聚焦时浮现。
+   关键点：气泡宽度跟着内容走，短消息时只有几十像素；若让操作条
+   参与这个宽度约束，它就会被压成 3~5 行并向上盖住正文。
+   所以这里 width: max-content + nowrap，让它按自身内容撑开。 */
 .msg-card { position: relative; }
 .msg-actions {
-  position: absolute; right: 8px; bottom: -14px;
+  position: absolute; left: 6px; bottom: -16px; right: auto;
+  width: max-content; max-width: calc(100vw - 220px);
   opacity: 0; pointer-events: none;
   transform: translateY(-2px);
   transition: opacity 0.15s ease, transform 0.15s ease;
@@ -1176,6 +1200,7 @@ onBeforeUnmount(() => {
 .msg-actions-inner {
   display: inline-flex; align-items: center; gap: 2px;
   padding: 2px 4px; border-radius: 999px;
+  white-space: nowrap;
   background: var(--bg-surface); border: 1px solid var(--border);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
