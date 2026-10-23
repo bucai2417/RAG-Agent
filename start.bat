@@ -62,8 +62,10 @@ if errorlevel 1 goto :build
 echo       frontend up to date, skip build
 goto :built
 :build
-echo       building frontend ^(vite only^)...
-call npx --no-install vite build
+echo       sources changed, building frontend ^(vite only^)...
+REM --logLevel warn keeps the 100+ asset lines out of the console; errors and
+REM warnings are still printed, and the exit code is unchanged.
+call npx --no-install vite build --logLevel warn
 if errorlevel 1 (
   echo [WARN] Frontend build failed; UI may be unavailable without web\dist.
 )
