@@ -73,8 +73,13 @@ def build_tool_hint(is_admin: bool = False) -> str:
         "**要按「第几段/某单元格」精确读写 docx/xlsx/pptx/pdf 时**，"
         "先用 read_doc_structure 拿到可寻址元素（address），再用 edit_doc_structure 按地址改写"
         "（它会另存新文件，不改原件）；只概括全文用 read_file 更省 token。"
-        "**需要登录态或 JS 渲染的网页**用浏览器工具：browser_tabs / browser_read / "
-        "browser_action（点击、填表、截图、跳转）；公开网页优先 http_request 更省资源。"
+        "**需要登录态或 JS 渲染的网页**用浏览器工具（不要用 http_request，它没有登录态）："
+        "**操作网页前先调 browser_snapshot** 拿到可交互元素的编号（形如 [3] button \"提交\"），"
+        "再用 browser_action 按 ref 操作（点击/填表/下拉/勾选/按键/等待/截图）；"
+        "多步操作放进 browser_action 的 steps 数组一次提交，遇错即停、比逐步调用省往返。"
+        "只读正文用 browser_read，看有哪些标签用 browser_tabs。"
+        "**不要自己猜 CSS 选择器**——你看不到 DOM，猜错的失败无从修正。"
+        "公开网页优先 http_request 更省资源。"
     )
     if is_admin:
         base += (

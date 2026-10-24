@@ -288,7 +288,14 @@ async def retrieve(
     candidate_k: int | None = None,
     score_threshold: float = 0.0,
     use_rerank: bool | None = None,
+    retrieval_lexical_guard: bool = True,
 ) -> RetrievalResponse:
+    """检索编排。
+
+    retrieval_lexical_guard：是否对**低分且词面无依据**的命中做复核丢弃
+    （见融合后的「词面依据复核」段）。默认开；检索调试页若要观察原始召回，
+    可传 False 关掉，看到的就是未经复核的完整候选。
+    """
     from app.core.config import settings
 
     # 默认条数取自系统设置（可热改），调用方显式传入则覆盖
@@ -412,6 +419,51 @@ async def retrieve(
             return (h.raw_score if h.raw_score is not None else h.score) >= score_threshold
 
         fused = [h for h in fused if _pass(h)]
+
+    # 词面依据复核（向量通路的兜底）。
+    #
+    # 为什么必须有这一步：BM25 召回在 keyword_search 里已按「覆盖率 + 双字组」
+    # 挡掉无关片段，向量召回却没有任何依据判据——余弦只要不是 0 就会进候选，
+    # 而小库（或方向不完全一致的分块）里余弦低到 0.05 的无关文档照样能占满 top_k。
+    # 线上表现就是：问「打开必应并搜索吕不韦」，回答下面挂着两份开发文档。
+    #
+    # 这里刻意**只在低分时**复核，且**只丢弃词面完全无依据的**：
+    # - 高分命中不动：语义检索的价值就在于用不同措辞命中（问「怎么退货」命中
+    #   「退换货规定」），拿字面去卡会毁掉它的主要优点；
+    # - 低分 + 词面无依据 = 纯噪声，留着只会误导用户；
+    # - 低分但词面有依据（比如问句里的实词确实出现在正文）说明有真实关联，
+    #   只是措辞不同或分块偏长把分数摊薄了，保留。
+    if retrieval_lexical_guard and fused:
+        from app.retrieval.bm25 import has_lexical_evidence
+
+        floor = settings.retrieval_vec_guard_floor
+
+        def _keep(h) -> bool:
+            # 外部知识库的排序由对方决定，本地词面判据不适用。
+            # 用 ext_ref 判断而非 sources：sources 只在多路 RRF 融合时填充，
+            # 只命中外部源（单路）时它是空集，看 sources 会把外部结果全丢掉。
+            if getattr(h, "ext_ref", None):
+                return True
+            srcs = getattr(h, "sources", None) or set()
+            # 纯 BM25 命中已在召回处判过，无需重复
+            if srcs == {"bm25"}:
+                return True
+            raw = h.raw_score if h.raw_score is not None else h.score
+            # 分数已明显高于地板 → 不当成噪声（语义命中，措辞可能完全不同）
+            if raw is not None and floor > 0 and raw >= floor:
+                return True
+            return has_lexical_evidence(query, h.parent_content or h.content)
+
+        kept = [h for h in fused if _keep(h)]
+        dropped = len(fused) - len(kept)
+        if dropped:
+            # 少量丢弃属正常（无关条目），全部丢光说明检索确实没找到依据 → 记 miss
+            from app.core.logging import get_logger as _get_logger
+
+            _get_logger("retrieval").info(
+                "lexical_guard_dropped", dropped=dropped, kept=len(kept), query=query[:80],
+            )
+        fused = kept
 
     chunks = await _to_chunks(db, fused)
     # 未命中日志（异步、不阻塞）——供知识库运营发现缺口

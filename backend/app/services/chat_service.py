@@ -100,6 +100,59 @@ def _build_context(chunks: list[RetrievedChunk]) -> tuple[str, list[Citation]]:
     return body, to_citations(chunks)
 
 
+def _merge_citations(primary: list[dict], secondary: list[dict]) -> list[dict]:
+    """合并两组引用并按内容去重，primary 的顺序保持在前。
+
+    为什么需要合并：一次回答可能来自两条路径——
+    - prepare() 阶段的预检索（回答前就把资料塞进上下文）
+    - 工具 knowledge_retrieval（AI 自己决定再查一次）
+    两组可能命中同一分块。前端对 citations 是整体替换语义，
+    直接各发一次会让后发的覆盖先发的，丢掉真正命中过的资料。
+
+    去重键优先 chunk_id（同一分块），外部知识库没有 chunk_id 时退回
+    (doc_title, page, snippet 前 40 字)——外部源每次返回的 chunk_id 都是占位 0，
+    只按 chunk_id 去重会把不同来源的资料合并成一条。
+    """
+    out: list[dict] = []
+    seen: set = set()
+    for c in list(primary) + list(secondary):
+        if not isinstance(c, dict):
+            continue
+        cid = c.get("chunk_id") or 0
+        if cid:
+            key = ("chunk", int(cid))
+        else:
+            key = (
+                "ext",
+                str(c.get("doc_title") or ""),
+                c.get("page"),
+                (str(c.get("snippet") or "")[:40]),
+            )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
+
+
+def _citation_usage(answer: str, citations: list[dict]) -> dict:
+    """答案实际用了哪些引用编号。
+
+    返回 {"used_ids": [1,3]}（1 基，与展示的 [1][2] 对齐）。
+    前端据此把「答案里提到过的」与「只是检索到的」区分开：
+    用户看到「引用来源」却找不到正文里对应的 [n]，会认为系统在乱标引用。
+    """
+    try:
+        from app.services.citation_check import check as _cite_check
+
+        used = _cite_check(answer, citations).get("used_ids") or []
+    except Exception:  # noqa: BLE001
+        used = []
+    n = len(citations or [])
+    # 只保留落在实际引用条数内的编号：越界的属于幻觉引用，不该被高亮
+    return {"used_ids": [i for i in used if 1 <= i <= n]}
+
+
 def guard_check(text: str):
     """对输入/内容做安全检查，返回 GuardResult 或 None（未启用时）。"""
     from app.core.config import settings
@@ -355,6 +408,7 @@ async def _stream_answer_locked(
     collected = ""
     collected_reasoning = ""
     usage: dict = {}
+    tool_citations: list[dict] = []  # 工具检索出的引用（与 prepare 的 citations 合并去重）
     tool_records: list[dict] = []  # 工具调用记录（含生成产物的 data，用于回填 artifacts）
     suspended_action_id: int | None = None
 
@@ -488,6 +542,12 @@ async def _stream_answer_locked(
                         "data": evt.get("data") if isinstance(evt.get("data"), dict) else None,
                     })
                     yield evt
+                elif t == "citations":
+                    # 工具（knowledge_retrieval）检索到的资料。不能直接转发就完事：
+                    # 循环结束后还会再发一次 citations，前端是「整体替换」语义，
+                    # 后发的那份会把这里的覆盖掉。收集起来，最后统一合并去重。
+                    tool_citations.extend(evt.get("citations") or [])
+                    yield evt
                 elif t == "_suspended":
                     suspended_action_id = evt.get("action_id")
                     yield {"type": "done", "message_id": None, "suspended": True}
@@ -519,7 +579,13 @@ async def _stream_answer_locked(
         yield {"type": "error", "message": str(e)[:300]}
 
     latency = int((time.time() - t0) * 1000)
-    yield {"type": "citations", "citations": [c.model_dump() for c in citations]}
+    # 引用合并：工具检索到的资料优先（那是 AI 真正看过的），再补 prepare 阶段的预检索结果。
+    # 前端对 citations 是整体替换语义，所以必须在这里一次给出最终列表。
+    final_citations = _merge_citations(tool_citations, [c.model_dump() for c in citations])
+    # used_ids：答案里真正标注了哪几个 [n]。前端据此区分「已引用」与「仅检索到」，
+    # 不再把「检索到但答案没提」的资料说成引用来源。
+    yield {"type": "citations", "citations": final_citations,
+           **_citation_usage(collected, final_citations)}
 
     # 归一化 usage（统一契约：prompt/completion/total/cached）
     from app.services.usage_service import normalize_usage
@@ -540,7 +606,7 @@ async def _stream_answer_locked(
         role="assistant",
         content=collected,
         reasoning=collected_reasoning or None,
-        citations=[c.model_dump() for c in citations],
+        citations=final_citations or None,
         tool_calls=tool_records or None,
         artifacts=artifacts or None,
         usage=norm,

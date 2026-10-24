@@ -6,6 +6,7 @@ from app.api.v1 import (
     apikey,
     audit,
     browser,
+    browser_live,
     auth,
     channels,
     changelog,
@@ -68,6 +69,7 @@ api_router.include_router(mcp.router)
 api_router.include_router(workflow.router)
 api_router.include_router(audit.router)
 api_router.include_router(browser.router)
+api_router.include_router(browser_live.router)
 api_router.include_router(apikey.router)
 api_router.include_router(sso.router)
 api_router.include_router(usage.router)

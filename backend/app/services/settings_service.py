@@ -49,6 +49,17 @@ FIELD_META: dict[str, dict[str, Any]] = {
                           "help": "0 = 不过滤"},
     "retrieval_bm25_min": {"label": "BM25 召回阈值", "group": "retrieval", "kind": "float",
                            "help": "0 = 不过滤"},
+    "retrieval_lexical_guard": {
+        "label": "词面依据复核（丢弃无依据的低分命中）", "group": "retrieval", "kind": "bool",
+        "help": "向量余弦不为 0 只说明共享了几个字；开启后，低分且查询词在片段里找不到"
+                "依据的命中会被丢弃，避免无关文档被当成参考资料展示。"
+                "关闭后按原始召回结果返回（检索调试页可临时关掉看全量候选）",
+    },
+    "retrieval_vec_guard_floor": {
+        "label": "复核豁免分数线", "group": "retrieval", "kind": "float",
+        "help": "原始相似度高于该值的命中不做词面复核，直接保留（保护「换了个说法」的语义命中）。"
+                "0 = 不豁免，全部按词面判断；强语义模型建议 0.3~0.5",
+    },
     "rerank_enabled": {"label": "启用重排", "group": "retrieval", "kind": "bool"},
     "rerank_pool": {"label": "重排候选数", "group": "retrieval", "kind": "int"},
     "rerank_allow_fake": {"label": "允许假重排（local_hash）", "group": "retrieval", "kind": "bool",

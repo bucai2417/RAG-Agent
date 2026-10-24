@@ -44,4 +44,5 @@ async def query(
         score_threshold=body.score_threshold,
         candidate_k=body.candidate_k,
         use_rerank=body.use_rerank,
+        retrieval_lexical_guard=body.lexical_guard,
     )

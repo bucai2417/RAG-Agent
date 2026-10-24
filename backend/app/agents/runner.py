@@ -466,7 +466,19 @@ class AgentRunner:
         await self.db.commit()
         await self._maybe_schedule_compress()
 
-        yield {"type": "citations", "citations": citations_json}
+        # used_ids：答案真正标注了哪几个 [n]，前端据此区分「已引用」与「仅检索到」。
+        # 与问答页口径一致（见 chat_service._citation_usage）。
+        used_ids: list[int] = []
+        try:
+            from app.services.citation_check import check as _cite_used
+
+            used_ids = [
+                i for i in (_cite_used(collected_text, citations_json).get("used_ids") or [])
+                if 1 <= i <= len(citations_json)
+            ]
+        except Exception:  # noqa: BLE001
+            pass
+        yield {"type": "citations", "citations": citations_json, "used_ids": used_ids}
         # 引用真实性校验（与问答页一致）：答案若出现不存在的 [n] 编号则告警
         try:
             from app.services.citation_check import check as _cite_check

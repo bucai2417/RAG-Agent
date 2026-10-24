@@ -12,7 +12,7 @@
       <span>松开即可添加到附件</span>
     </div>
 
-    <div class="chat-shell">
+    <div class="chat-shell" :class="{ 'with-browser': browserPanel.open.value }">
       <!-- ================= 历史会话侧栏 ================= -->
       <aside class="conv-side app-card">
         <div class="cs-head">
@@ -104,6 +104,13 @@
 
           <div class="cb-right">
             <!-- 参数设置（温度）按钮移入输入框工具栏，这里不再重复放一个 -->
+            <el-tooltip :content="browserPanel.open.value ? '收起浏览器画面' : '查看浏览器画面'" placement="top">
+              <el-button
+                size="small" text :icon="Monitor"
+                :class="{ 'cb-on': browserPanel.open.value }"
+                @click="browserPanel.toggle()"
+              />
+            </el-tooltip>
             <el-tooltip v-if="msgs.length >= 4" content="对话目录" placement="top">
               <el-button size="small" text :icon="List" @click="outlineOpen = true" />
             </el-tooltip>
@@ -201,21 +208,12 @@
                 <PendingActionCard :action="m.pending" :resolved="m.pendingResolved" @confirm="(aid, d) => confirmAction(i, aid, d)" />
               </div>
 
-              <!-- 引用来源 -->
-              <div v-if="m.citations?.length" class="cites">
-                <div class="cites-label">引用来源（点击查看）：</div>
-                <div class="cite-tags">
-                  <el-tag
-                    v-for="(c, ci) in m.citations"
-                    :key="ci"
-                    :type="c.source_uri ? 'warning' : 'primary'"
-                    class="cite-tag"
-                    @click="c.source_uri ? windowOpen(c.source_uri) : openCitation(c)"
-                  >
-                    [{{ ci + 1 }}] {{ c.doc_title || '文档' }}{{ c.page ? ` · 第${c.page}页` : '' }}{{ c.source_uri ? ' ↗' : '' }}
-                  </el-tag>
-                </div>
-              </div>
+              <!-- 引用来源：区分「答案里标注过」与「只是检索到」 -->
+              <CitationList
+                :citations="m.citations || []"
+                :used-ids="m.usedCitationIds"
+                @open="openCitation"
+              />
 
               <!-- 操作条：悬浮显示，不常驻占位 -->
               <div v-if="m.role === 'assistant' && !m.streaming && m.content" class="msg-actions">
@@ -327,6 +325,20 @@
           </ChatComposer>
         </div>
       </section>
+
+      <!--
+        右侧：浏览器实时画面。
+        只在展开时才挂载 —— 组件一挂载就会连 WS 并开始推帧，
+        常驻挂载等于让每个开着聊天页的用户都在后台烧 CPU 和带库。
+      -->
+      <BrowserLivePanel
+        v-if="browserPanel.open.value"
+        :open="browserPanel.open.value"
+        :follow-url="browserPanel.followUrl.value"
+        :follow-seq="browserPanel.followSeq.value"
+        class="browser-col"
+        @close="browserPanel.close()"
+      />
     </div>
 
     <!-- 引用原文预览抽屉 -->
@@ -357,9 +369,11 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Plus, MoreFilled, Edit, Delete, Setting, List, Tools, Paperclip,
   DocumentCopy, RefreshRight, Select, CloseBold, ArrowDown, Loading,
-  UploadFilled,
+  UploadFilled, Monitor,
 } from '@element-plus/icons-vue'
 import MarkdownBody from '@/components/MarkdownBody.vue'
+import CitationList from '@/components/CitationList.vue'
+import BrowserLivePanel from '@/components/BrowserLivePanel.vue'
 import AttachmentView from '@/components/AttachmentView.vue'
 import ReasoningBlock from '@/components/ReasoningBlock.vue'
 import ToolSteps from '@/components/ToolSteps.vue'
@@ -371,10 +385,13 @@ import ContextRing from '@/components/ContextRing.vue'
 import {
   chatApi, confirmToolAction, docApi, kbApi, providerApi, streamChat, usageApi,
   type Attachment, type ArtifactRef, type Citation, type ContextStats, type Conversation, type KB,
-  type Message, type ModelConfig, type PendingActionEvt, type StreamHandlers, type UsageTotals,
+  type Message, type ModelConfig, type PendingActionEvt, type StreamHandlers, type ToolCallEvt,
+  type ToolResultEvt, type UsageTotals,
 } from '@/api'
 import { errMsg } from '@/api/http'
+import { usedCiteIds } from '@/utils/citation'
 import { useAuthStore } from '@/stores/auth'
+import { useBrowserPanel, isBrowserTool } from '@/composables/useBrowserPanel'
 
 interface Msg {
   id?: number
@@ -382,6 +399,8 @@ interface Msg {
   content: string
   reasoning?: string
   citations?: Citation[]
+  /** 答案里真正标注过的引用编号（1 基）；空 = 检索到但没用上 */
+  usedCitationIds?: number[]
   attachments?: Attachment[]
   artifacts?: ArtifactRef[]
   usage?: Record<string, number>
@@ -397,6 +416,7 @@ interface Msg {
 
 const route = useRoute()
 const auth = useAuthStore()
+const browserPanel = useBrowserPanel()
 const userInitial = computed(() =>
   (auth.user?.display_name || auth.user?.username || 'U').slice(0, 1).toUpperCase(),
 )
@@ -611,6 +631,9 @@ function mapMessages(ms: Message[]) {
       content: m.content,
       reasoning: m.reasoning,
       citations: m.citations,
+      // 历史消息不落 usedCitationIds（后端只在事件里下发），按正文现算：
+      // 否则刷新页面后同一句话的引用归属会从「已引用」变回「仅检索到」。
+      usedCitationIds: usedCiteIds(m.content, m.citations),
       attachments: m.attachments,
       artifacts: m.artifacts,
       feedback: m.feedback,
@@ -814,17 +837,27 @@ async function send() {
     },
     onDelta: (t) => patchLast(startKey, (m) => ({ ...m, content: m.content + t })),
     onReasoning: (t) => patchLast(startKey, (m) => ({ ...m, reasoning: (m.reasoning || '') + t })),
-    onToolCall: (evt) => patchLast(startKey, (m) => ({ ...m, steps: [...(m.steps || []), { call: evt }] })),
-    onToolResult: (evt) =>
-      patchLast(startKey, (m) => {
+    onToolCall: (evt) => {
+      // AI 一动浏览器就把实时画面顶出来：否则用户只能看到一行"浏览网页"，
+      // 不知道它到底在哪个页面、点了什么
+      browserPanel.autoShowForTool(evt?.name)
+      patchLast(startKey, (m) => ({ ...m, steps: [...(m.steps || []), { call: evt }] }))
+    },
+    onToolResult: (evt) => {
+      // 结果里带着"操作完之后所在的页面地址"：面板据此切到那个标签。
+      // 不这么做的话，AI 在第二个标签里干活时面板还停在第一个页面，用户会看错页。
+      if (isBrowserTool(evt?.name)) browserPanel.follow(evt?.data?.url)
+      return patchLast(startKey, (m) => {
         const steps = [...(m.steps || [])]
         const i = steps.findIndex((s) => s.call.id === evt.id && !s.result)
         if (i >= 0) steps[i] = { ...steps[i], result: evt }
         else steps.push({ call: { id: evt.id, name: evt.name, arguments: '' }, result: evt })
         return { ...m, steps }
-      }),
+      })
+    },
     onPendingAction: (evt) => patchLast(startKey, (m) => ({ ...m, pending: evt, streaming: false })),
-    onCitations: (cit) => patchLast(startKey, (m) => ({ ...m, citations: cit })),
+    onCitations: (cit, used) =>
+      patchLast(startKey, (m) => ({ ...m, citations: cit, usedCitationIds: used })),
     onCitationCheck: (evt) => {
       if (evt.has_fake_cite) ElMessage.warning(evt.warning)
     },
@@ -901,7 +934,25 @@ async function regenerate() {
     {
       onDelta: (t: string) => patchLast(startKey, (m) => ({ ...m, content: m.content + t })),
       onReasoning: (t: string) => patchLast(startKey, (m) => ({ ...m, reasoning: (m.reasoning || '') + t })),
-      onCitations: (cit: Citation[]) => patchLast(startKey, (m) => ({ ...m, citations: cit })),
+      // 重新生成同样会走工具循环：AI 若借浏览器重做，面板必须像首次发送一样顶出来，
+      // 否则用户点「重新生成」后画面停在收起状态，只能看到一行"浏览网页"
+      onToolCall: (evt: ToolCallEvt) => {
+        browserPanel.autoShowForTool(evt?.name)
+        patchLast(startKey, (m) => ({ ...m, steps: [...(m.steps || []), { call: evt }] }))
+      },
+      onToolResult: (evt: ToolResultEvt) => {
+        if (isBrowserTool(evt?.name)) browserPanel.follow(evt?.data?.url)
+        patchLast(startKey, (m) => {
+          const steps = [...(m.steps || [])]
+          const i = steps.findIndex((s) => s.call.id === evt.id && !s.result)
+          if (i >= 0) steps[i] = { ...steps[i], result: evt }
+          else steps.push({ call: { id: evt.id, name: evt.name, arguments: '' }, result: evt })
+          return { ...m, steps }
+        })
+      },
+      onPendingAction: (evt: PendingActionEvt) => patchLast(startKey, (m) => ({ ...m, pending: evt, streaming: false })),
+      onCitations: (cit: Citation[], used?: number[]) =>
+        patchLast(startKey, (m) => ({ ...m, citations: cit, usedCitationIds: used })),
       onUsage: (u: any) => patchLast(startKey, (m) => ({ ...m, usage: u })),
       onDone: (mid: number) => patchLast(startKey, (m) => ({ ...m, id: mid, streaming: false })),
       onError: (msg: string) => ElMessage.error(msg),
@@ -916,7 +967,10 @@ async function confirmAction(idx: number, actionId: number, decision: 'approve' 
   patchAt(key, idx, (m) => ({ ...m, pendingResolved: true, streaming: decision === 'approve' }))
   try {
     await confirmToolAction(actionId, decision, {
-      onToolResult: (data: any) =>
+      onToolResult: (data: any) => {
+        // 审批通过后才真正执行（browser_action 是写工具），此时画面才有变化
+        browserPanel.autoShowForTool(data?.name)
+        if (isBrowserTool(data?.name)) browserPanel.follow(data?.data?.url)
         patchAt(key, idx, (m) => {
           const steps = [...(m.steps || [])]
           let i = steps.findIndex((s) => s.call.id === data.id && !s.result)
@@ -924,10 +978,12 @@ async function confirmAction(idx: number, actionId: number, decision: 'approve' 
           if (i >= 0) steps[i] = { ...steps[i], result: data }
           else steps.push({ call: { id: data.id, name: data.name, arguments: '' }, result: data })
           return { ...m, steps }
-        }),
+        })
+      },
       onDelta: (t) => patchAt(key, idx, (m) => ({ ...m, content: (m.content || '') + t })),
       onReasoning: (t) => patchAt(key, idx, (m) => ({ ...m, reasoning: (m.reasoning || '') + t })),
-      onCitations: (cit) => patchAt(key, idx, (m) => ({ ...m, citations: cit })),
+      onCitations: (cit, used) =>
+        patchAt(key, idx, (m) => ({ ...m, citations: cit, usedCitationIds: used })),
       onPendingAction: (p) => patchAt(key, idx, (m) => ({ ...m, pending: p, pendingResolved: false, streaming: false })),
       onContext: (s) => {
         ctxStats.value = s
@@ -1006,9 +1062,6 @@ async function openCitation(c: Citation) {
     ElMessage.error(errMsg(e))
   }
 }
-function windowOpen(u: string) {
-  window.open(u, '_blank')
-}
 
 // ---- 滚动 ----
 function scrollToBottom() {
@@ -1086,6 +1139,14 @@ onBeforeUnmount(() => {
   height: calc(100vh - var(--header-h) - 48px);
   min-height: 520px;
 }
+/* 展开浏览器画面：右侧让出固定宽度的一列。
+   用 minmax 而不是固定 px —— 窄屏时聊天列仍要留出可读宽度 */
+.chat-shell.with-browser {
+  grid-template-columns: 232px minmax(320px, 1fr) clamp(360px, 34vw, 640px);
+}
+
+/* 浏览器实时画面列 */
+.browser-col { min-width: 0; }
 
 /* 会话侧栏 */
 .conv-side { display: flex; flex-direction: column; overflow: hidden; padding: 12px; }
@@ -1117,6 +1178,8 @@ onBeforeUnmount(() => {
 .cb-group { display: flex; align-items: center; gap: 6px; }
 .cb-label { font-size: 12px; color: var(--text-secondary); }
 .cb-right { margin-left: auto; display: flex; align-items: center; gap: 2px; }
+/* 浏览器画面开关的"已开启"态：与其它纯文字按钮区分，让人知道当前为什么变窄了 */
+.cb-on { color: var(--color-primary); background: var(--color-primary-subtle); }
 /* 知识库选择器：固定宽度，不独占整行（el-select 默认 width:100% 会撑满 flex 行） */
 .kb-picker { width: 240px; flex: 0 0 auto; }
 .kb-picker :deep(.el-select__wrapper) { min-height: 24px; }
@@ -1173,11 +1236,6 @@ onBeforeUnmount(() => {
 .artifacts-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
 
 .msg-pending { margin-top: 10px; }
-
-.cites { margin-top: 10px; border-top: 1px solid var(--border-subtle); padding-top: 8px; }
-.cites-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
-.cite-tags { display: flex; flex-wrap: wrap; gap: 6px; }
-.cite-tag { cursor: pointer; }
 
 /* 操作条：悬浮在消息卡片下沿之外，默认透明，hover/聚焦时浮现。
    关键点：气泡宽度跟着内容走，短消息时只有几十像素；若让操作条
@@ -1260,5 +1318,22 @@ onBeforeUnmount(() => {
 @media (max-width: 900px) {
   .chat-shell { grid-template-columns: 1fr; }
   .conv-side { display: none; }
+}
+
+/* 中等宽度：浏览器列收窄，保证聊天列不被挤到不可读 */
+@media (max-width: 1440px) {
+  .chat-shell.with-browser { grid-template-columns: 200px minmax(300px, 1fr) clamp(320px, 32vw, 480px); }
+}
+
+/* 窄屏：三列放不下，画面改成浮层盖在聊天上（仍然可用，不挤没聊天区） */
+@media (max-width: 1100px) {
+  .chat-shell.with-browser { grid-template-columns: 200px 1fr; }
+  .browser-col {
+    position: fixed; z-index: 900;
+    right: 16px; bottom: 16px;
+    width: min(520px, calc(100vw - 32px));
+    height: min(70vh, 640px);
+    box-shadow: var(--shadow-floating);
+  }
 }
 </style>

@@ -377,7 +377,8 @@ export const chatApi = {
 export interface StreamHandlers {
   onMeta?: (data: { conversation_id: number }) => void
   onDelta?: (text: string) => void
-  onCitations?: (citations: Citation[]) => void
+  /** usedIds：答案里真正标注过的 [n]（1 基）。为空表示检索到了但没用上。 */
+  onCitations?: (citations: Citation[], usedIds?: number[]) => void
   onUsage?: (usage: Record<string, number>, latency: number) => void
   onDone?: (messageId: number) => void
   onError?: (msg: string) => void
@@ -472,7 +473,7 @@ function dispatchEvent(event: string, data: any, handlers: StreamHandlers) {
   if (event === 'meta') handlers.onMeta?.(data)
   else if (event === 'delta') handlers.onDelta?.(data.text || '')
   else if (event === 'reasoning') handlers.onReasoning?.(data.text || '')
-  else if (event === 'citations') handlers.onCitations?.(data.citations || [])
+  else if (event === 'citations') handlers.onCitations?.(data.citations || [], data.used_ids || [])
   else if (event === 'usage') handlers.onUsage?.(data.usage || {}, data.latency_ms || 0)
   else if (event === 'done') handlers.onDone?.(data.message_id)
   else if (event === 'error') handlers.onError?.(data.message)
@@ -1541,6 +1542,23 @@ export const browserApi = {
   launch: (params: { executable?: string; port?: number; headless?: boolean }) =>
     http.post<BrowserStatus>('/browser/launch', null, { params }).then((r) => r.data),
   stop: () => http.post<BrowserStatus>('/browser/stop').then((r) => r.data),
+  /**
+   * 实时画面 WebSocket 地址。
+   * token 必须走 query：浏览器原生 WebSocket 不能携带 Authorization 头
+   * （与企业聊天室 /chat/rooms/ws 同一做法）。
+   */
+  liveUrl: () => {
+    const token = localStorage.getItem('access_token') || ''
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    return `${proto}://${location.host}${API_BASE}/browser/live?token=${encodeURIComponent(token)}`
+  },
+}
+
+/** 标签页条目（后端 /browser/live 推来的 tabs 消息） */
+export interface BrowserLiveTab {
+  id: string
+  title: string
+  url: string
 }
 
 // ---------------- 可选组件（浏览器运行时等，用户点按安装） ----------------

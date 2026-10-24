@@ -52,7 +52,30 @@ def _apply_permission(stmt, pf: PermissionFilter, dialect: str):
     stmt = stmt.where(Chunk.enabled.is_(True))
     # 只检索子块/扁平块，不检索父块
     stmt = stmt.where(Chunk.chunk_type != "parent")
+    # 排除解析失败/未就绪文档残留的半截分块（见 _exclude_broken_docs）
+    stmt = _exclude_broken_docs(stmt)
     return stmt
+
+
+def _exclude_broken_docs(stmt):
+    """排除未完成/解析失败的文档留下的分块。
+
+    解析失败的文档常残留半截分块（入库时先切块再嵌入，随时可能中断），
+    它们内容不完整、页码对不上原文，被当成引用来源展示给用户就是误导。
+    只排除明确不可用的状态：pending/parsing/chunking/embedding/failed/disabled。
+    文档行不存在时（历史脏数据）不排除——宁可显示也不静默丢内容。
+    用 NOT EXISTS 而不是 JOIN：JOIN 会改变 select 的列形状，影响既有调用方。
+    """
+    from sqlalchemy import exists, select as _select
+
+    from app.models import Document
+
+    bad = _select(Document.id).where(
+        (Document.id == Chunk.doc_id)
+        & (Document.status.in_(("pending", "parsing", "chunking", "embedding", "failed", "disabled")))
+    )
+    return stmt.where(~exists(bad))
+
 
 
 def _dialect_of(db) -> str:
@@ -168,6 +191,11 @@ class PgVectorStore(VectorStore):
               AND {acl_clause}
               AND enabled = true
               AND chunk_type != 'parent'
+              AND NOT EXISTS (
+                SELECT 1 FROM document d
+                WHERE d.id = chunk.doc_id
+                  AND d.status IN ('pending','parsing','chunking','embedding','failed','disabled')
+              )
             ORDER BY embedding <=> :q
             LIMIT :k
         """

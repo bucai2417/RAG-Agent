@@ -14,6 +14,8 @@ class RetrievalRequest(BaseModel):
     score_threshold: float = 0.0
     candidate_k: int = Field(default=20, ge=1, le=100)
     use_rerank: bool | None = None
+    # 调试用：关掉「词面依据复核」，看到未经复核的完整候选（排查召回噪声时用）
+    lexical_guard: bool = True
 
 
 class RetrievedChunk(BaseModel):

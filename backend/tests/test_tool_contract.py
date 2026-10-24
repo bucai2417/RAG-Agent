@@ -71,3 +71,38 @@ def test_browser_action_is_confirmable_write_tool():
     assert inspect.iscoroutinefunction(t.run)
     # 网页点击/填表有外部副作用，必须经人工确认
     assert t.needs_confirm({"action": "click", "selector": "#submit"}) is True
+    assert t.needs_confirm({"action": "click", "ref": 3}) is True
+
+
+def test_browser_readonly_actions_skip_confirmation():
+    """只读步骤免确认，否则"看一眼正文"也要点审批，交互成本过高。"""
+    from app.agents.tools.browser_tools import BrowserActionTool
+
+    t = BrowserActionTool()
+    for readonly in ("read", "screenshot", "wait", "wait_for", "assert_text", "scroll"):
+        assert t.needs_confirm({"action": readonly}) is False, readonly
+
+
+def test_browser_action_batch_confirm_follows_write_steps():
+    """批量步骤里只要有一个写动作就要确认；全是只读则不确认。"""
+    from app.agents.tools.browser_tools import BrowserActionTool
+
+    t = BrowserActionTool()
+    assert t.needs_confirm({"steps": [
+        {"action": "read"}, {"action": "click", "ref": 1},
+    ]}) is True
+    assert t.needs_confirm({"steps": [
+        {"action": "read"}, {"action": "wait", "ms": 10},
+    ]}) is False
+
+
+def test_browser_snapshot_tool_is_registered_read_only():
+    """browser_snapshot 必须存在且是只读工具：它只取页面结构，不改页面。"""
+    from app.agents.tools.browser_tools import BROWSER_TOOLS
+
+    by_name = {t.name: t for t in BROWSER_TOOLS}
+    assert "browser_snapshot" in by_name, "缺少 browser_snapshot 工具"
+    snap = by_name["browser_snapshot"]
+    assert snap.kind == "read"
+    assert callable(snap.run)
+    assert inspect.iscoroutinefunction(snap.run)

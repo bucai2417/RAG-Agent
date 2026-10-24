@@ -119,6 +119,12 @@ class Settings(BaseSettings):
     retrieval_candidate_k: int = 20
     retrieval_vec_min: float = 0.0    # 向量召回前置门（0=不过滤）
     retrieval_bm25_min: float = 0.0   # BM25 召回前置门（0=不过滤）
+    # 词面依据复核：低分（< floor）且查询词在片段里找不到依据的命中直接丢弃。
+    # 向量余弦不是 0 只说明"共享了几个字"，小库里无关文档很容易占满 top_k，
+    # 用户看到的就是回答下挂着几份毫不相关的资料。floor=0 表示只看词面依据、
+    # 不设分数豁免，适用于小库或 local_hash 这类弱向量模型。
+    retrieval_lexical_guard: bool = True
+    retrieval_vec_guard_floor: float = 0.0
     rerank_enabled: bool = False      # 是否启用重排
     rerank_pool: int = 30             # 进重排的候选数
     rerank_allow_fake: bool = False   # 允许 local_hash 假重排（仅自测）

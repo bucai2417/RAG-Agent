@@ -56,7 +56,8 @@ async def run_react_loop(
     tool_config: dict | None = None,
     dynamic_tools: dict[str, object] | None = None,
     temperature: float = 0.3,
-    max_turns: int = 6,
+    max_turns: int = 0,
+    budget_seconds: int = 0,
     allow_auto_write: bool = False,
     on_audit: Callable[..., Awaitable[None]] | None = None,
     on_pending_action: Callable[[object, ToolCall, dict], Awaitable[object]] | None = None,
@@ -67,6 +68,11 @@ async def run_react_loop(
     当某次工具结果 data.enable_tools 命中时，按需启用（下一轮 LLM 可见），用于省 token。
     默认 None → 行为与不带该参数完全一致（向后兼容）。
 
+    max_turns：**<= 0 表示不限制轮次**（默认）。浏览器自动化这类多步任务
+    （snapshot → click → snapshot → fill → …）不该被固定轮数腰斩。
+    不限制不等于放任：另有两道兜底——连续两轮相同调用即终止；
+    整体时间预算 budget_seconds（<=0 时取 settings.agent_loop_budget_seconds）到点强制收尾。
+
     返回事件流；调用方负责落库助手消息。
     """
     tool_by_name = {t.name: t for t in tools}
@@ -75,7 +81,23 @@ async def run_react_loop(
     repeat = 0
     exhausted = True  # 轮次耗尽（未自然结束）
 
-    for turn in range(max_turns):
+    if budget_seconds <= 0:
+        from app.core.config import settings as _settings
+
+        budget_seconds = int(getattr(_settings, "agent_loop_budget_seconds", 900) or 0)
+    deadline = (time.time() + budget_seconds) if budget_seconds > 0 else None
+
+    turn = 0
+    while True:
+        # 轮次上限：仅当显式配置了正数时才生效（默认不限制）
+        if max_turns > 0 and turn >= max_turns:
+            break
+        # 时间预算：防止无上限轮次把连接和模型配额吃光
+        if deadline is not None and time.time() >= deadline:
+            yield {"type": "delta", "text": "\n（已达到本次执行时间上限，正在收尾）"}
+            break
+        turn += 1
+
         acc_tool: dict[int, dict] = {}
         turn_text = ""
         pending_enable: list[str] = []
@@ -113,7 +135,7 @@ async def run_react_loop(
 
         for tc in tool_calls:
             yield {"type": "tool_call", "id": tc.id, "name": tc.name,
-                   "arguments": tc.arguments, "turn": turn + 1}
+                   "arguments": tc.arguments, "turn": turn}
             tool = tool_by_name.get(tc.name)
             # 解析参数（HITL 判定与执行都要用）
             try:
@@ -177,7 +199,7 @@ async def run_react_loop(
             yield {
                 "type": "tool_result", "id": tc.id, "name": tc.name,
                 "content": result.content[:4000], "is_error": result.is_error,
-                "data": result.data, "turn": turn + 1,
+                "data": result.data, "turn": turn,
             }
             # 动态启用：工具结果若声明 enable_tools，收集起来在下一轮生效
             if dynamic_tools and isinstance(result.data, dict):
@@ -210,7 +232,7 @@ async def run_react_loop(
                 openai_tools = to_openai_schema(list(tool_by_name.values()))
             pending_enable.clear()
 
-        yield {"type": "turn", "turn": turn + 1}
+        yield {"type": "turn", "turn": turn}
 
     # 轮次耗尽仍想调工具 → 强制收尾一次（不带工具），避免回答戛然而止
     if exhausted:
