@@ -398,6 +398,11 @@ async def _stream_answer_locked(
         db, ps=ps, body_kb_ids=conversation.kb_ids or [], query=query, top_k=top_k,
         images=images, use_retrieval=use_retrieval, history=history, summary=summary,
     )
+    # 检索开的读事务到此为止：下面全是「等模型 / 等工具」的长等待（几十秒~几分钟），
+    # 不该继续占着一条连接（SQLite 池只有 1~3 条，占满后其它对话直接 503）。
+    from app.core.db import release_connection
+
+    await release_connection(db)
 
     # 防「嘴上说不调工具」：先判断用户要「效果」还是「文件」，两者分流
     if use_tools:
@@ -466,6 +471,9 @@ async def _stream_answer_locked(
                     messages.insert(0, ChatMessage(role="system", content=skill_block))
         except Exception:  # noqa: BLE001
             logger.exception("resolve_tools_failed")
+
+    # 工具装配也会查库（技能/权限），到这里同样把连接还回去再进模型循环
+    await release_connection(db)
 
     try:
         if tools:
@@ -837,6 +845,10 @@ async def _resume_answer_locked(
             pass
 
     suspended = False
+    # 续跑同样要先把连接还回去，再进模型循环（与首次回答一致）
+    from app.core.db import release_connection
+
+    await release_connection(db)
     try:
         async for evt in run_react_loop(
             db=db, ps=ps, perms=perms_set, llm=llm, rm=rm, messages=messages,

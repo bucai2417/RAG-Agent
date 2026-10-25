@@ -98,6 +98,15 @@ async def run_react_loop(
             break
         turn += 1
 
+        # 进下一轮模型调用前先把连接还给池：上一轮工具只 flush 不 commit，
+        # 连接会一直被这条事务占着，而模型生成动辄几十秒。SQLite 池只有 1~3 条，
+        # 占满后其它对话直接 503。这里提交的正是「已完成的那一轮工具效果」，
+        # 语义上也更诚实：工具确实执行过，就不该因为最终回答没生成而被回滚。
+        if db is not None:
+            from app.core.db import release_connection
+
+            await release_connection(db)
+
         acc_tool: dict[int, dict] = {}
         turn_text = ""
         pending_enable: list[str] = []

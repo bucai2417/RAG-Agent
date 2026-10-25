@@ -80,11 +80,20 @@ def _engine_kwargs_for(url: str) -> dict[str, Any]:
     if url.startswith("sqlite"):
         # SQLite 只有单写者：池开大只会让更多连接排队撞写锁，反而放大
         # "database is locked"。这里刻意收窄，把并发压力交给应用层的排队。
+        # 上限独立于 db_pool_size：后者是 PG/MySQL 的连接预算（20 量级），
+        # 两库共用必然有一边配错。取值夹在 1~3，配大了也只会误伤自己。
         kw["connect_args"] = {
             "check_same_thread": False,
             "timeout": settings.db_busy_timeout,
         }
-        kw.update(pool_size=max(1, settings.db_pool_size), max_overflow=0)
+        kw.update(
+            pool_size=max(1, min(3, settings.db_sqlite_pool_size)),
+            max_overflow=0,
+            # 池被占满时的排队上限，与 PG 共用同一个配置；超时会被转成 503 +
+            # Retry-After（见 app.core.errors.db_timeout_error_handler），
+            # 而不是静默挂起或变成看不出原因的 500。
+            pool_timeout=settings.db_pool_timeout,
+        )
     else:
         kw.update(
             pool_pre_ping=True,
@@ -108,7 +117,9 @@ def _attach_sqlite_pragmas(engine, is_sqlite: bool) -> None:
         cur = dbapi_conn.cursor()
         try:
             cur.execute("PRAGMA journal_mode=WAL")
-            cur.execute("PRAGMA busy_timeout=15000")
+            # 用配置值而不是写死 15000：这里会覆盖 connect_args 的 timeout，
+            # 写死的话「系统设置 → SQLite 写锁等待」改了也不生效。
+            cur.execute(f"PRAGMA busy_timeout={max(0, int(settings.db_busy_timeout * 1000))}")
             cur.execute("PRAGMA synchronous=NORMAL")
         finally:
             cur.close()
@@ -197,6 +208,20 @@ async def get_db() -> AsyncSession:
         except Exception:
             await session.rollback()
             raise
+
+
+async def release_connection(session: AsyncSession) -> None:
+    """把 session 当前占用的连接还给池（提交但保留 session 可用）。
+
+    为什么需要：AsyncSession 一执行 SELECT 就开事务并占住一条连接，直到 commit / close。
+    流式回答要等模型几十秒到几分钟，这段等待期连接是空占的——池缩到 3（SQLite 单写者）
+    之后，第 4 个并发对话会在 pool_timeout 后拿到 503。所以在「调用 LLM / 跑外部工具」
+    这类长时间等待之前，先把连接还回去，用完再取。
+
+    只在该次请求真的开过事务时提交，避免给只读请求引入多余的空事务。
+    """
+    if session.in_transaction():
+        await session.commit()
 
 
 async def init_models() -> None:

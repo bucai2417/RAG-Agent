@@ -69,6 +69,17 @@ class ValidationError(AppError):
     code = "validation_error"
 
 
+class ServiceUnavailableError(AppError):
+    """依赖资源暂时不可用（连接池排队超时、数据库暂不可达等）。
+
+    区别于 500：这类失败是「现在太忙」，重试或扩容就能恢复，
+    负载均衡/前端应当按可重试处理；500 表示代码里出了问题。
+    """
+
+    status_code = 503
+    code = "service_unavailable"
+
+
 class UpstreamError(AppError):
     """上游模型/服务调用失败，携带结构化诊断信息（供前端展示与修复建议）。"""
 
@@ -120,4 +131,34 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
     return JSONResponse(
         status_code=500,
         content={"code": "internal_error", "message": "服务器内部错误"},
+    )
+
+
+async def db_timeout_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """连接池排队超时 → 503（可重试），而不是 500（代码有问题）。
+
+    SQLAlchemy 在 ``pool_timeout`` 内拿不到空闲连接时抛 ``sqlalchemy.exc.TimeoutError``。
+    它继承自 SQLAlchemyError → 会落进 unhandled handler 变成 500，
+    于是「机器忙」和「代码炸了」在监控上无法区分，前端也不会重试。
+    SQLite 池现在只有 1~3 个连接，这个转换尤其关键。
+    """
+    from app.core.logging import get_logger
+
+    log = get_logger("error")
+    log.warning("db_pool_timeout", path=str(request.url), err=str(exc)[:200])
+    # 池配置信息对排查有用，且不含连接串（不泄露口令）
+    from app.core.db import async_engine
+
+    try:
+        pool = async_engine.pool.status()
+    except Exception:  # noqa: BLE001
+        pool = ""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "code": "service_unavailable",
+            "message": "数据库繁忙，请稍后重试",
+            "detail": {"reason": "db_pool_timeout", "pool": pool},
+        },
+        headers={"Retry-After": "1"},
     )

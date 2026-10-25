@@ -116,6 +116,11 @@ class Settings(BaseSettings):
     db_pool_recycle: int = 1800     # 连接回收（秒），防中间件/防火墙掐断空闲连接
     # SQLite 专用：遇到写锁时等待多久（秒）。SQLite 单写者，调大能减少 500。
     db_busy_timeout: int = 15
+    # SQLite 专用：连接池上限（1~3）。SQLite 是单写者，池开大不会提升写入吞吐，
+    # 只会让更多连接排队撞写锁，把「database is locked」放大成批量失败。
+    # 刻意与 db_pool_size 分开：后者是 PG/MySQL 的连接预算，两库上限差一个数量级，
+    # 共用一个值必然有一边配错（此前就是 SQLite 复用了 20）。
+    db_sqlite_pool_size: int = 3
     # 配合 PgBouncer 等外部连接池时开启（asyncpg statement cache 与 transaction 模式不兼容）
     db_disable_asyncpg_stmt_cache: bool = False
     # 启动期是否自动执行 alembic 迁移（false 可跳过；跳过时需自行保证 schema 已就绪）

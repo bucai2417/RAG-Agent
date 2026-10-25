@@ -300,6 +300,15 @@ app.add_middleware(
 app.add_exception_handler(AppError, app_error_handler)
 app.add_exception_handler(Exception, unhandled_error_handler)
 
+# 连接池排队超时必须单独注册：它继承 SQLAlchemyError，否则会落到 Exception 处理器的 500，
+# 而「现在太忙」应当是 503 + Retry-After，前端与负载均衡才会重试。SQLite 池只有 1~3 个连接，
+# 触发它的概率比 PG 高得多。
+from sqlalchemy.exc import TimeoutError as _SATimeoutError  # noqa: E402
+
+from app.core.errors import db_timeout_error_handler  # noqa: E402
+
+app.add_exception_handler(_SATimeoutError, db_timeout_error_handler)
+
 app.include_router(api_router, prefix=settings.api_prefix)
 
 # OpenAI 兼容端点（根路径 /v1，供内部系统用现成 SDK 接入）

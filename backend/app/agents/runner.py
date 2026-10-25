@@ -377,6 +377,12 @@ class AgentRunner:
         turns = 0
         suspended = False
 
+        # 装配阶段的查询（权限/技能/能力摘要）到此结束；下面整段是「等模型」的长等待，
+        # 不把连接带进流式过程（SQLite 池只有 1~3 条，占满即 503）。
+        from app.core.db import release_connection
+
+        await release_connection(self.db)
+
         try:
             if not tools:
                 # 退化：单次生成

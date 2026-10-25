@@ -179,8 +179,9 @@ FIELD_META: dict[str, dict[str, Any]] = {
     # ---- 高级（谨慎）----
     "database_url": {"label": "数据库连接串", "group": "advanced", "kind": "secret", "restart": True,
                      "help": "改动需重启；重启时会自动迁移到最新 schema，失败则回退到原库"},
-    "db_pool_size": {"label": "连接池大小", "group": "advanced", "kind": "int", "restart": True,
-                     "help": "仅 PostgreSQL/MySQL 生效；多副本时总连接数不要超过数据库 max_connections"},
+    "db_pool_size": {"label": "连接池大小（PG/MySQL）", "group": "advanced", "kind": "int", "restart": True,
+                     "help": "仅 PostgreSQL/MySQL 生效；多副本时总连接数不要超过数据库 max_connections。"
+                             "SQLite 用下面独立的「SQLite 连接池上限」"},
     "db_max_overflow": {"label": "连接池溢出上限", "group": "advanced", "kind": "int", "restart": True,
                         "help": "池满后允许临时新建的连接数；耗尽后请求等待 pool_timeout 秒"},
     "db_pool_timeout": {"label": "取连接超时（秒）", "group": "advanced", "kind": "int", "restart": True,
@@ -189,6 +190,10 @@ FIELD_META: dict[str, dict[str, Any]] = {
                         "help": "防止防火墙/中间件掐断空闲连接导致首批请求失败"},
     "db_busy_timeout": {"label": "SQLite 写锁等待（秒）", "group": "advanced", "kind": "int", "restart": True,
                         "help": "SQLite 单写者；调大可减少 database is locked"},
+    "db_sqlite_pool_size": {"label": "SQLite 连接池上限（1~3）", "group": "advanced", "kind": "int",
+                            "restart": True,
+                            "help": "SQLite 只有单写者，池开大不会变快，只会让更多连接排队撞写锁。"
+                                    "与上面的 PG/MySQL 连接池是两个独立预算，取值会被夹在 1~3"},
     "db_auto_migrate": {"label": "启动时自动迁移", "group": "advanced", "kind": "bool", "restart": True,
                         "help": "关闭后需自行执行 alembic upgrade head"},
     "vector_backend": {"label": "向量后端", "group": "advanced", "kind": "str", "restart": True,
