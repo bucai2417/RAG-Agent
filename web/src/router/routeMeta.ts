@@ -30,6 +30,9 @@ export const ROUTE_PERMS: Record<string, string> = {
   '/admin/roles': 'role:read',
   '/admin/depts': 'dept:read',
   '/admin/groups': 'group:read',
+  // 组织页对所有人开放（展示自己的组织与配额）；跨组织列表由页面按
+  // is_platform_admin 决定是否渲染，后端也另有 platform 作用域校验
+  '/admin/tenants': '',
   '/admin/audit': 'audit:read',
   '/admin/logs': 'system:read',
   '/admin/api-keys': 'apikey:read',

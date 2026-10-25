@@ -38,6 +38,7 @@ const router = createRouter({
         { path: 'admin/roles', name: 'admin-roles', component: () => import('@/pages/admin/RolePage.vue') },
         { path: 'admin/depts', name: 'admin-depts', component: () => import('@/pages/admin/DeptPage.vue') },
         { path: 'admin/groups', name: 'admin-groups', component: () => import('@/pages/admin/GroupPage.vue') },
+        { path: 'admin/tenants', name: 'admin-tenants', component: () => import('@/pages/admin/TenantPage.vue') },
         { path: 'admin/settings', name: 'admin-settings', component: () => import('@/pages/admin/SettingsPage.vue') },
         { path: 'admin/browser', name: 'admin-browser', component: () => import('@/pages/admin/BrowserPage.vue') },
         { path: 'admin/system-ops', name: 'admin-system-ops', component: () => import('@/pages/admin/SystemOpsPage.vue') },

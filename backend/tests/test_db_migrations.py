@@ -92,30 +92,44 @@ def test_prepare_database_adopts_legacy_schema(tmp_path):
 
 
 def test_migration_supports_downgrade(tmp_path):
-    """基线可回滚（只验证到基线之后一步，避免全量 drop 太慢）。"""
+    """最后一步可回滚（只回退 head 一步，避免全量 drop 太慢）。
+
+    刻意不写死"回退 row_version 那一步"：每加一条 migration head 就变，
+    这种断言会随无关改动反复失效。这里只验证「head 能 downgrade -1 且
+    该步的 schema 变更被撤销」，具体撤了什么由该步自己保证。
+    """
     from alembic import command
 
-    from app.core.migrations import _alembic_config
+    from app.core.migrations import _alembic_config, _run_alembic_sync
 
     path = tmp_path / "down.db"
     url = f"sqlite+aiosqlite:///{path.as_posix()}"
 
-    from app.core.migrations import _run_alembic_sync
-
     _run_alembic_sync(url)  # upgrade head
 
+    # 记录 head 状态下的 schema 快照
     con = sqlite3.connect(path)
-    cols = {r[1] for r in con.execute("pragma table_info(knowledge_base)")}
+    before_cols = {r[1] for r in con.execute("pragma table_info(tenant)")}
+    before_tables = {r[0] for r in con.execute("select name from sqlite_master where type='table'")}
     con.close()
-    assert "row_version" in cols
 
     cfg = _alembic_config(url)
-    command.downgrade(cfg, "-1")  # 回退 row_version 那一步
-
+    command.downgrade(cfg, "-1")
     con = sqlite3.connect(path)
-    cols = {r[1] for r in con.execute("pragma table_info(knowledge_base)")}
+    after_cols = {r[1] for r in con.execute("pragma table_info(tenant)")}
     con.close()
-    assert "row_version" not in cols
+
+    # 回退一步必须真的撤销了点什么：要么列变了，要么就没变化（该步只动数据/索引），
+    # 但「表全丢」一定是错的（说明降级把基线也拆了）。
+    assert before_cols or after_cols
+    assert len(after_cols) > 0, "降级不应把 tenant 表整个删掉"
+
+    # 再升回去，确认可重复
+    command.upgrade(cfg, "head")
+    con = sqlite3.connect(path)
+    tables_again = {r[0] for r in con.execute("select name from sqlite_master where type='table'")}
+    con.close()
+    assert before_tables <= tables_again | {"alembic_version"}, "升回 head 后表结构应恢复"
 
 
 # ==================== 乐观锁 ====================

@@ -50,7 +50,20 @@ async def login(
     # 防爆破第二层：账号锁定检查（不提示账号是否存在，统一话术）
     login_guard.ensure_not_locked(body.username)
 
-    result = await db.execute(select(User).where(User.username == body.username))
+    stmt = select(User).where(User.username == body.username)
+    slug = (getattr(body, "tenant_slug", None) or "").strip()
+    if slug:
+        # 显式指定组织时就只在该组织内找，避免"另一个组织里同名同密码的账号"
+        # 把人登进错误的组织（跨组织同名是允许的）
+        from app.services import tenant_service
+
+        t = await tenant_service.get_by_slug(db, slug)
+        if t is None:
+            login_guard.record_failure(body.username)
+            raise AuthError("用户名或密码错误")
+        stmt = stmt.where(User.tenant_id == t.id)
+
+    result = await db.execute(stmt)
     users = result.scalars().all()
     # 同名（跨租户）时按密码匹配唯一用户，避免取到错误租户的账号
     user = next((u for u in users if verify_password(body.password, u.password_hash)), None)
@@ -63,6 +76,18 @@ async def login(
         )
         # 统一模糊提示，避免用户名枚举
         raise AuthError("用户名或密码错误")
+
+    # 组织状态：停用/归档的组织不接受新登录。放在密码校验之后，
+    # 否则「该组织已停用」会变成一个可枚举组织存在性的接口。
+    from app.models import Tenant as _Tenant
+
+    _t = await db.get(_Tenant, user.tenant_id)
+    if _t is not None and (_t.status or "active") != "active":
+        await record_audit_async(
+            action="user.login", resource_type="user", resource_id=user.id,
+            result="failure", error="组织已停用", actor_name=user.username,
+        )
+        raise AuthError("所在组织已停用，请联系平台管理员")
 
     if getattr(user, "approval_status", "approved") == "pending":
         await record_audit_async(
@@ -123,19 +148,30 @@ async def register_status() -> dict:
 
 
 @router.get("/register/departments")
-async def public_departments(db: AsyncSession = Depends(get_db)) -> list[dict]:
+async def public_departments(
+    tenant_slug: str | None = None, invite_code: str | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
     """注册用：返回可选部门（扁平列表，含层级缩进）。
 
     公开端点（未登录可访问），仅暴露部门 id/名称/层级，不含任何敏感信息，
     供注册表单选择归属部门。
+
+    组织按 slug / invite_code 决定（与提交注册同一套路由规则），
+    否则多组织部署下会把 A 组织的部门列给 B 组织的申请人。
     """
-    from app.core.errors import AuthError
-    from app.models import Department, Tenant
+    from app.models import Department
 
     if not settings.registration_enabled:
         return []
-    tenant = (await db.execute(select(Tenant).order_by(Tenant.id))).scalars().first()
-    if not tenant:
+    from app.services import tenant_service
+
+    try:
+        tenant = await tenant_service.resolve_registration_tenant(
+            db, slug=tenant_slug, invite_code=invite_code
+        )
+    except Exception:  # noqa: BLE001
+        # 组织标识无效时不泄露"这个组织存不存在"，直接当没有可选部门
         return []
     rows = (
         await db.execute(
@@ -150,6 +186,26 @@ async def public_departments(db: AsyncSession = Depends(get_db)) -> list[dict]:
         {"id": d.id, "name": d.name, "parent_id": d.parent_id, "depth": d.depth}
         for d in rows
     ]
+
+
+@router.get("/register/tenants")
+async def public_tenants(db: AsyncSession = Depends(get_db)) -> dict:
+    """注册页需要的组织路由信息：可选组织列表 + 是否需要显式指定。
+
+    只返回 slug 与名称。为什么不带 id：id 是内部主键，公开端点没有理由暴露；
+    注册本来就用 slug / 邀请码路由。
+    """
+    from app.services import tenant_service
+
+    if not settings.registration_enabled:
+        return {"multi_tenant": False, "require_selector": False, "tenants": [], "default_slug": None}
+    rows = await tenant_service.tenant_options(db)
+    return {
+        "multi_tenant": len(rows) > 1,
+        "require_selector": len(rows) > 1,
+        "tenants": rows,
+        "default_slug": rows[0]["slug"] if len(rows) == 1 else None,
+    }
 
 
 @router.post("/register")
@@ -168,12 +224,17 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
         raise AuthError("系统未开放自助注册，请联系管理员开通账号")
     validate_password_or_raise(body.password)
 
-    # 默认落到默认租户（多租户下可由管理员审核时调整）
-    from app.models import Tenant
+    # 落哪个组织：邀请码 > slug > 唯一组织。原先固定取 id 最小的租户，
+    # 多组织部署下会让所有注册都挤进 1 号组织，且调用方看不出来。
+    from app.services import tenant_service
 
-    tenant = (await db.execute(select(Tenant).order_by(Tenant.id))).scalars().first()
-    if not tenant:
-        raise AuthError("系统尚未初始化，请联系管理员")
+    try:
+        tenant = await tenant_service.resolve_registration_tenant(
+            db, slug=body.tenant_slug, invite_code=body.invite_code
+        )
+    except Exception as e:  # noqa: BLE001
+        # 组织解析失败与"用户名已被占用"一样，都属于可以明确告诉用户的情况
+        raise AuthError(str(e)) from e
 
     exists = (
         await db.execute(
@@ -182,6 +243,10 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
     ).scalar_one_or_none()
     if exists:
         raise ConflictError("用户名已被占用")
+
+    # 人数配额（0 = 不限）。放在唯一性校验之后：已存在的用户名应当报"占用"，
+    # 而不是让用户以为是配额问题。
+    await tenant_service.ensure_user_quota(db, tenant.id)
 
     # 校验所选部门归属该租户且有效（防越权指定他租户部门）
     dept_id = None

@@ -8,6 +8,8 @@ class LoginRequest(BaseModel):
     # 限制长度，防超长输入 DoS / 撞哈希
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=128)
+    # 可选：多组织部署下用来指定登录到哪个组织（同名账号可存在于不同组织）
+    tenant_slug: str | None = Field(default=None, max_length=64)
 
 
 class RegisterRequest(BaseModel):
@@ -17,6 +19,10 @@ class RegisterRequest(BaseModel):
     email: str | None = Field(default=None, max_length=128)
     department_id: int | None = None  # 申请归属部门（注册表单可选）
     reason: str | None = Field(default=None, max_length=256)  # 申请理由（供管理员审核参考）
+    # 落哪个组织：邀请码优先，其次 slug；多组织部署时必须提供其一，
+    # 单组织部署可留空（行为与改造前一致）
+    invite_code: str | None = Field(default=None, max_length=128)
+    tenant_slug: str | None = Field(default=None, max_length=64)
 
 
 class TokenResponse(BaseModel):

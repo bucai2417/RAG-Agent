@@ -23,6 +23,12 @@
         <p class="lc-sub">登录后进入你的工作台</p>
 
         <el-form ref="formRef" :model="form" :rules="rules" size="large" @submit.prevent>
+          <!-- 多组织部署：同名账号可存在于不同组织，需显式选择才能登进正确的那一个 -->
+          <el-form-item v-if="tenantRequired" prop="tenant_slug">
+            <el-select v-model="form.tenant_slug" placeholder="选择组织" style="width: 100%">
+              <el-option v-for="t in tenants" :key="t.slug" :label="t.name" :value="t.slug" />
+            </el-select>
+          </el-form-item>
           <el-form-item prop="username">
             <el-input v-model="form.username" placeholder="用户名" :prefix-icon="User" />
           </el-form-item>
@@ -107,13 +113,16 @@ const auth = useAuthStore()
 const formRef = ref<FormInstance>()
 const loading = ref(false)
 const remember = ref(false)
-const form = reactive({ username: '', password: '' })
+const form = reactive({ username: '', password: '', tenant_slug: null as string | null })
 
 // 单点登录
 const ssoProviders = ref<SsoProvider[]>([])
 const ssoRedirecting = ref(false)
 // 自助注册是否开放（由后端设置决定）
 const registrationOpen = ref(false)
+// 组织路由：单组织部署时不显示选择框（行为与改造前一致）
+const tenants = ref<{ slug: string; name: string }[]>([])
+const tenantRequired = ref(false)
 const rules: FormRules = {
   username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
   password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
@@ -142,6 +151,15 @@ async function loadRegisterStatus() {
     registrationOpen.value = !!(await authApi.registerStatus()).enabled
   } catch {
     registrationOpen.value = false
+  }
+  // 组织列表与注册开关无关：登录同样需要（多组织下要选对组织）
+  try {
+    const cfg = await authApi.registerTenants()
+    tenants.value = cfg.tenants || []
+    tenantRequired.value = !!cfg.require_selector
+    if (!tenantRequired.value && cfg.tenants.length === 1) form.tenant_slug = cfg.tenants[0].slug
+  } catch {
+    /* 拿不到就退回不指定：单组织部署等于默认组织 */
   }
 }
 
@@ -208,7 +226,7 @@ async function submit() {
   if (!ok) return
   loading.value = true
   try {
-    await auth.login(form.username, form.password)
+    await auth.login(form.username, form.password, form.tenant_slug || undefined)
     // 记住密码：勾选则保存，取消则清除
     if (remember.value) {
       localStorage.setItem(RK_FLAG, '1')

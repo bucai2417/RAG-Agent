@@ -21,6 +21,26 @@
 
       <template v-else>
         <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @submit.prevent>
+          <!-- 邀请注册：带上邀请码时组织已确定，不再让用户选 -->
+          <el-alert
+            v-if="inviteMode"
+            :title="inviteTenantName ? `受邀加入「${inviteTenantName}」` : '已识别邀请码'"
+            description="组织由邀请链接决定，无需再选择"
+            type="success"
+            :closable="false"
+            show-icon
+            class="rc-alert"
+          />
+          <!-- 多组织部署：必须显式选组织，否则后端会拒绝（避免注册进错误的组织） -->
+          <el-form-item
+            v-else-if="tenantCfg.require_selector"
+            label="加入组织"
+            prop="tenant_slug"
+          >
+            <el-select v-model="form.tenant_slug" placeholder="请选择组织" style="width: 100%">
+              <el-option v-for="t in tenantCfg.tenants" :key="t.slug" :label="t.name" :value="t.slug" />
+            </el-select>
+          </el-form-item>
           <el-form-item label="用户名" prop="username">
             <el-input v-model="form.username" placeholder="2-64 位，字母/数字/_.@-" :prefix-icon="User" />
           </el-form-item>
@@ -68,18 +88,35 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { User, Lock, Message } from '@element-plus/icons-vue'
 import { authApi } from '@/api'
 import { errMsg } from '@/api/http'
 
 const router = useRouter()
+const route = useRoute()
 const formRef = ref<FormInstance>()
 const loading = ref(false)
 const closed = ref(false)
 const departments = ref<{ id: number; name: string; parent_id: number | null; depth: number }[]>([])
+
+// 组织路由：邀请码优先于 slug。单组织部署时两者都为空，行为与改造前一致。
+const tenantCfg = reactive({
+  multi_tenant: false,
+  require_selector: false,
+  tenants: [] as { slug: string; name: string }[],
+  default_slug: null as string | null,
+})
+const inviteCode = ref('')
+const inviteMode = ref(false)
+
+const inviteTenantName = computed(() => {
+  // 邀请码对应的组织无法从公开接口得知（避免枚举），这里只在能唯一确定时显示名称
+  const only = tenantCfg.tenants.length === 1 ? tenantCfg.tenants[0] : null
+  return only && inviteMode.value ? only.name : ''
+})
 
 const form = reactive({
   username: '',
@@ -89,6 +126,7 @@ const form = reactive({
   email: '',
   department_id: null as number | null,
   reason: '',
+  tenant_slug: null as string | null,
 })
 
 const rules: FormRules = {
@@ -109,6 +147,13 @@ const rules: FormRules = {
     },
   ],
   email: [{ type: 'email', message: '邮箱格式不正确', trigger: 'blur' }],
+  tenant_slug: [
+    {
+      validator: (_r, v, cb) =>
+        !tenantCfg.require_selector || inviteMode.value || v ? cb() : cb(new Error('请选择要加入的组织')),
+      trigger: 'change',
+    },
+  ],
 }
 
 onMounted(async () => {
@@ -122,8 +167,24 @@ onMounted(async () => {
   } catch {
     /* 接口不可用：按未开放处理，避免提交后才报错 */
   }
+  inviteCode.value = String(route.query.invite || '').trim()
+  inviteMode.value = !!inviteCode.value
   try {
-    departments.value = (await authApi.registerDepartments()) || []
+    const cfg = await authApi.registerTenants()
+    Object.assign(tenantCfg, cfg)
+    // 单组织部署：直接用唯一组织，省掉一次选择
+    if (!inviteMode.value && cfg.tenants.length === 1) {
+      form.tenant_slug = cfg.tenants[0].slug
+    }
+  } catch {
+    /* 拿不到组织配置时退回「不指定」——后端会在多组织下明确拒绝 */
+  }
+  try {
+    departments.value =
+      (await authApi.registerDepartments({
+        tenantSlug: form.tenant_slug || undefined,
+        inviteCode: inviteCode.value || undefined,
+      })) || []
   } catch {
     departments.value = []
   }
@@ -141,6 +202,8 @@ async function submit() {
       email: form.email || undefined,
       department_id: form.department_id,
       reason: form.reason || undefined,
+      invite_code: inviteCode.value || undefined,
+      tenant_slug: inviteMode.value ? undefined : form.tenant_slug || undefined,
     })
     ElMessage.success(r.message || '注册成功')
     router.replace('/login')

@@ -148,8 +148,46 @@ async def user_has_permission(db: AsyncSession, user: User, code: str) -> bool:
     return "*" in perms or code in perms
 
 
+async def is_platform_admin(db: AsyncSession, user: User) -> bool:
+    """是否平台管理员（可跨租户操作）。
+
+    判定依据只能是 **platform 作用域**的角色授予：
+    - ``user.is_admin`` 与 ``super_admin`` 的 tenant 级授予都意味着「本租户的管理员」，
+      用它去跨租户操作等于让任一组织的管理员管理所有组织；
+    - 所以跨租户端点（租户列表/配额/停用）一律走这个判定，而不是 is_admin。
+
+    这样默认部署不受影响：单租户时唯一的组织就是自己的组织，而
+    「平台运维」需要显式把一个角色授予到 platform 作用域（见 rbac 的授予规则）。
+    """
+    rows = await db.execute(
+        select(UserRole.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .where(
+            UserRole.user_id == user.id,
+            UserRole.scope_type == "platform",
+            or_(UserRole.expires_at.is_(None), UserRole.expires_at > utcnow()),
+            or_(Role.tenant_id.is_(None), Role.tenant_id == user.tenant_id),
+        )
+        .limit(1)
+    )
+    return rows.scalar_one_or_none() is not None
+
+
+async def require_platform_admin(
+    user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+) -> User:
+    """平台管理员门：跨租户端点专用（租户创建/停用/配额）。"""
+    if await is_platform_admin(db, user):
+        return user
+    raise PermissionDeniedError("需要平台管理员权限（platform 作用域的超级管理员）")
+
+
 def require_permission(code: str):
-    """权限门依赖工厂：缺权限则 403。is_admin 直通（兼容遗留）。"""
+    """权限门依赖工厂：缺权限则 403。is_admin 直通（兼容遗留）。
+
+    注意 is_admin 只是**本租户**的管理员：它不该让跨租户端点通过，
+    所以那些端点用 require_platform_admin，而不是这里。
+    """
 
     async def _dep(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)) -> User:
         if user.is_admin:

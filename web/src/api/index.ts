@@ -204,8 +204,10 @@ export interface NotificationItem {
 // ---------------- 认证 ----------------
 
 export const authApi = {
-  login: (username: string, password: string) =>
-    http.post('/auth/login', { username, password }).then((r) => r.data),
+  login: (username: string, password: string, tenantSlug?: string) =>
+    http
+      .post('/auth/login', { username, password, tenant_slug: tenantSlug || null })
+      .then((r) => r.data),
   me: () => http.get<User>('/auth/me').then((r) => r.data),
   updateProfile: (data: { display_name?: string; email?: string; phone?: string; avatar?: string }) =>
     http.patch<User>('/auth/profile', data).then((r) => r.data),
@@ -221,17 +223,108 @@ export const authApi = {
     email?: string
     department_id?: number | null
     reason?: string
+    /** 落哪个组织：邀请码优先，其次 slug；单组织部署可留空 */
+    invite_code?: string | null
+    tenant_slug?: string | null
   }) => http.post<{ message: string; pending: boolean }>('/auth/register', data).then((r) => r.data),
   // 注册用可选部门（公开端点，未开放注册时返回空数组）
-  registerDepartments: () =>
+  registerDepartments: (opts?: { tenantSlug?: string; inviteCode?: string }) =>
     http
       .get<{ id: number; name: string; parent_id: number | null; depth: number }[]>(
         '/auth/register/departments',
+        {
+          params: {
+            tenant_slug: opts?.tenantSlug || undefined,
+            invite_code: opts?.inviteCode || undefined,
+          },
+        },
       )
       .then((r) => r.data),
   // 注册是否开放（公开端点）
   registerStatus: () =>
     http.get<{ enabled: boolean; require_approval: boolean }>('/auth/register/status').then((r) => r.data),
+  // 注册页需要的组织路由信息（公开端点，只含 slug 与名称）
+  registerTenants: () =>
+    http
+      .get<{
+        multi_tenant: boolean
+        require_selector: boolean
+        tenants: { slug: string; name: string }[]
+        default_slug: string | null
+      }>('/auth/register/tenants')
+      .then((r) => r.data),
+}
+
+// ---------------- 组织（租户） ----------------
+
+export interface TenantMe {
+  id: number
+  name: string
+  slug: string
+  status: string
+  plan: string
+  is_platform_admin: boolean
+  max_users: number
+  max_documents: number
+  max_storage_bytes: number
+  users: number
+  documents: number
+  storage_bytes: number
+}
+
+export interface TenantRow extends TenantMe {
+  invite_code?: string | null
+  note?: string | null
+  created_at?: string | null
+}
+
+export const tenantApi = {
+  /** 当前组织与用量（任何登录用户可读） */
+  me: () => http.get<TenantMe>('/tenants/me').then((r) => r.data),
+  updateMyQuota: (data: { max_users?: number; max_documents?: number; max_storage_bytes?: number }) =>
+    http.patch<TenantMe>('/tenants/me/quota', data).then((r) => r.data),
+  getInviteCode: () =>
+    http
+      .get<{ invite_code: string | null; enabled: boolean; register_url: string }>(
+        '/tenants/me/invite-code',
+      )
+      .then((r) => r.data),
+  /** 轮换邀请码：旧码立即失效，这是撤销外流邀请链接的唯一手段 */
+  rotateInviteCode: () =>
+    http
+      .post<{ invite_code: string | null; enabled: boolean; register_url: string }>(
+        '/tenants/me/invite-code',
+      )
+      .then((r) => r.data),
+  clearInviteCode: () => http.delete('/tenants/me/invite-code').then((r) => r.data),
+  // 以下为平台管理员（platform 作用域）专属
+  list: () => http.get<TenantRow[]>('/tenants').then((r) => r.data),
+  create: (data: {
+    name: string
+    slug: string
+    plan?: string
+    max_users?: number
+    max_documents?: number
+    max_storage_bytes?: number
+    note?: string | null
+    admin_username?: string | null
+    admin_password?: string | null
+    admin_display_name?: string | null
+    admin_email?: string | null
+  }) => http.post<TenantRow>('/tenants', data).then((r) => r.data),
+  update: (
+    id: number,
+    data: {
+      name?: string
+      status?: string
+      plan?: string
+      max_users?: number
+      max_documents?: number
+      max_storage_bytes?: number
+      note?: string | null
+    },
+  ) => http.patch<TenantRow>(`/tenants/${id}`, data).then((r) => r.data),
+  archive: (id: number) => http.delete(`/tenants/${id}`).then((r) => r.data),
 }
 
 // ---------------- 知识库 ----------------

@@ -167,7 +167,8 @@ const permLabels: Record<string, string> = {
   'group:read': '查看用户组', 'group:manage': '管理用户组',
   'audit:read': '查看审计日志', 'apikey:read': '查看密钥', 'apikey:manage': '管理密钥',
   'system:read': '查看系统日志', 'system:write': '管理系统日志',
-  'sso:read': '查看 SSO', 'sso:manage': '管理 SSO', 'tenant:manage': '租户管理',
+  'sso:read': '查看 SSO', 'sso:manage': '管理 SSO',
+  'tenant:manage': '调整组织配额', 'tenant:invite': '管理组织邀请入组',
 }
 
 const auth = useAuthStore()

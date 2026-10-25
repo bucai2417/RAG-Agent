@@ -474,8 +474,11 @@ async def delete_user(
     if owned:
         raise ConflictError(f"该用户是 {owned} 个知识库的拥有者，请先转移或删除这些知识库")
 
-    # 清理关联
-    await db.execute(_del(UserRole).where(UserRole.user_id == u.id))
+    # 清理关联。角色授予必须清干净：user_role 无外键级联，而 SQLite 会复用
+    # 已删行的 rowid，残留授予会被下一个新建用户「继承」。
+    from app.services.tenant_service import purge_user_grants
+
+    await purge_user_grants(db, u.id)
     await db.execute(_del(Notification).where(Notification.user_id == u.id))
     await db.delete(u)
     await db.flush()

@@ -47,6 +47,9 @@ async def create_kb(
     user: User = Depends(require_permission("kb:create")),
     db: AsyncSession = Depends(get_db),
 ) -> KnowledgeBase:
+    from app.services import tenant_service
+
+    await tenant_service.ensure_kb_quota(db, user.tenant_id)
     kb = KnowledgeBase(
         tenant_id=user.tenant_id,
         name=body.name,

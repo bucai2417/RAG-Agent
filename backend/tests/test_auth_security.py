@@ -340,8 +340,11 @@ async def _run_registration_notify():
         class _Req:  # 模拟 Request 只需 headers/client
             headers = {}
             client = None
+        # 必须显式指定组织：测试库中通常已有多个组织，无参注册会被明确拒绝
+        # （这正是本次改造的目的——不再静默落进「编号最小的那个」）
         await register(RegisterRequest(username=uname, password="Notify@2026x",
-                                       display_name="通知测试", reason="测试通知"), _Req(), db)
+                                       display_name="通知测试", reason="测试通知",
+                                       tenant_slug=t.slug), _Req(), db)
         await db.commit()
 
     async with AsyncSessionLocal() as db:

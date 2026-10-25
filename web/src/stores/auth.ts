@@ -30,8 +30,8 @@ export const useAuthStore = defineStore('auth', {
         this.loading = false
       }
     },
-    async login(username: string, password: string) {
-      const r = await authApi.login(username, password)
+    async login(username: string, password: string, tenantSlug?: string) {
+      const r = await authApi.login(username, password, tenantSlug)
       localStorage.setItem('access_token', r.access_token)
       if (r.refresh_token) localStorage.setItem('refresh_token', r.refresh_token)
       await this.fetchMe()

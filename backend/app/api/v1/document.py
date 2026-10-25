@@ -65,6 +65,11 @@ async def upload_document(
         raise PermissionDeniedError(f"不支持的文件类型: .{ext}")
 
     data = await file.read()
+    # 配额（0 = 不限）：在读入内存后、落盘前判断，避免先写文件再回滚留下孤儿文件
+    from app.services import tenant_service as _ts
+
+    await _ts.ensure_document_quota(db, user.tenant_id, len(data))
+
     storage = get_storage()
     file_key, content_hash = storage.save(tenant_id=user.tenant_id, filename=filename, data=data)
 

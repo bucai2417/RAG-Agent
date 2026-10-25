@@ -81,7 +81,12 @@ PERMISSIONS: list[tuple[str, str, str, str]] = [
     ("system:manage", "管理系统设置", "system", "manage"),
     ("sso:read", "查看 SSO", "sso", "read"),
     ("sso:manage", "管理 SSO", "sso", "manage"),
-    ("tenant:manage", "租户管理", "tenant", "manage"),
+    # 拆成两项而不是一项：
+    #   tenant:manage —— 配额/计费边界，属于平台侧，不该由被限额方自调；
+    #   tenant:invite —— 本组织的邀请入组与邀请码轮换，这是日常运营动作。
+    # 早先只有 tenant:manage 一项，导致组织管理员连自己组织的邀请码都改不了。
+    ("tenant:manage", "调整组织配额", "tenant", "manage"),
+    ("tenant:invite", "管理组织邀请入组", "tenant", "invite"),
 ]
 
 # 权限 code -> 简写分组
@@ -94,6 +99,7 @@ _ALL = [p[0] for p in PERMISSIONS]
 ROLES: list[tuple[str, str, str, list[str], str]] = [
     ("super_admin", "超级管理员", "platform", _ALL, "平台最高权限，可管理所有租户；一般仅系统所有者使用"),
     ("tenant_admin", "租户管理员", "tenant",
+     # 含 tenant:invite（管自己组织的邀请入组），但不含 tenant:manage（配额由平台侧控制）
      [c for c in _ALL if c != "tenant:manage"], "管理本租户的用户、角色、知识库与全部业务功能"),
     ("kb_admin", "知识库管理员", "tenant", [
         "kb:create", "kb:read", "kb:update", "kb:delete", "kb:member_manage",

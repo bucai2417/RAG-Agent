@@ -39,6 +39,7 @@ from app.api.v1 import (
     sso,
     system,
     system_ops,
+    tenant,
     tools,
     update,
     usage,
@@ -59,6 +60,8 @@ api_router.include_router(chat.router)
 api_router.include_router(chat_room.router)
 api_router.include_router(provider.router)
 api_router.include_router(rbac.router)
+# 租户管理：/tenants/me 必须早于 /tenants/{id}（在模块内部已排好顺序）
+api_router.include_router(tenant.router)
 api_router.include_router(agents.router)
 # 技能市场必须注册在 skills 之前：skills 的 /{skill_id}/... 动态段会抢占 /skills/market/*
 api_router.include_router(skill_market.router)

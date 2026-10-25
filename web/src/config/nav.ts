@@ -84,6 +84,7 @@ export const NAV: (NavItem | NavGroup)[] = [
       { key: '/admin/roles', icon: 'Avatar', label: '角色', perm: 'role:read' },
       { key: '/admin/depts', icon: 'OfficeBuilding', label: '部门', perm: 'dept:read' },
       { key: '/admin/groups', icon: 'UserFilled', label: '用户组', perm: 'group:read' },
+      { key: '/admin/tenants', icon: 'OfficeBuilding', label: '组织', tip: '多组织、配额与邀请入组' },
     ],
   },
   {
