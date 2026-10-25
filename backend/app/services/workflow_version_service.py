@@ -88,7 +88,11 @@ async def rollback(
         db, wf=wf, user_id=user_id, note=f"回滚到 v{v.version}",
     )
     await db.flush()
-    return {"message": f"已回滚到 v{v.version}", "version": wf.version}
+    return {
+        "message": f"已回滚到 v{v.version}",
+        "version": wf.version,
+        "row_version": wf.row_version,
+    }
 
 
 async def _workflow_of(db: AsyncSession, *, tenant_id: int, agent_id: int) -> Workflow:

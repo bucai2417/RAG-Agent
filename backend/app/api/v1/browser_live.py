@@ -159,14 +159,27 @@ class _Live:
         await sess.__aexit__(None, None, None)
 
     async def attach(self, tab: C.Tab) -> None:
-        """连到指定标签并开始推帧。切标签时先干净地拆掉旧连接。"""
+        """连到指定标签并开始推帧。切标签时先干净地拆掉旧连接。
+
+        只接受顶层标签：跨进程 iframe 在 `/json/list` 里同样是 page 且带 ws
+        地址，但 screencast 之类的命令在子帧上会被浏览器拒绝
+        （`Command can only be executed on top-level targets`）。
+        子帧 id 由 `_do_switch` 先归到父标签再进来。
+        """
+        if tab.parent_id or tab.type != "page":
+            raise ValidationError("只能显示顶层标签页；iframe 请切到它所在的标签")
+
         await self.close_session()
         self.tab = tab
         self.invalidate_viewport()
         self.throttle.reset()
 
         sess = C.CDPSession(tab.ws_url)
-        await sess.__aenter__()
+        try:
+            await sess.__aenter__()
+        except Exception as e:  # noqa: BLE001
+            # 连不上就干净退出：此时 self.sess 还没赋值，不能把半开对象留在字段上
+            raise ValidationError(f"无法连接该标签页：{str(e)[:200]}") from e
         self.sess = sess
         sess.on("Page.screencastFrame", self._on_frame)
         # 页面跳转/重载后视口可能变（响应式布局），清缓存重新量
@@ -176,9 +189,23 @@ class _Live:
             await sess.call("Page.enable")
             await sess.screencast_start(quality=self.quality)
         except ValidationError as e:
-            self.sess = None
-            await sess.__aexit__(None, None, None)
+            if self.sess is sess:
+                self.sess = None
+            try:
+                await sess.__aexit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
             raise ValidationError(f"无法开始实时画面：{e}") from e
+        except Exception as e:  # noqa: BLE001
+            # 连接中途断开、协议库异常等：同样不能留下半开会话，否则下一次
+            # attach 会先对着一个死连接发 stopScreencast（还要等超时）
+            if self.sess is sess:
+                self.sess = None
+            try:
+                await sess.__aexit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+            raise ValidationError(f"无法开始实时画面：{str(e)[:200]}") from e
 
         await self.send_json({
             "type": "attached", "tab_id": tab.id, "url": tab.url, "title": tab.title,
@@ -275,17 +302,17 @@ class _Live:
             return
         if t == "tabs":
             # 只刷新列表，不动当前连接：用户在看某个页面时不该被切走
-            tabs = await C.list_tabs(f"http://127.0.0.1:{self.port}")
+            top = _top_level(await self._tabs())
             await self.send_json({
-                "type": "tabs", "tabs": _tabs_payload(tabs),
+                "type": "tabs", "tabs": _tabs_payload(top),
                 "active": self.tab.id if self.tab else None,
             })
             return
         if t == "attach":
-            await self._do_attach()
+            await self._safe_attach(self._do_attach)
             return
         if t == "switch_tab":
-            await self._do_switch(msg["tab_id"])
+            await self._safe_attach(lambda: self._do_switch(msg["tab_id"]))
             return
 
         # 其余动作都要求已连上标签
@@ -321,21 +348,58 @@ class _Live:
             logger.warning("live_action_failed", action=t, error=str(e)[:200])
             await self.send_json({"type": "error", "message": f"操作失败：{str(e)[:200]}"})
 
+    async def _safe_attach(self, fn) -> None:
+        """attach/switch 的失败必须回给前端，不能掀掉整条 WS。
+
+        之前 attach 抛出的 ValidationError 会一路冒到 browser_live 的
+        receive 循环外，被外层 except 记成 live_ws_error 并直接关连接，
+        前端只能看到"断开"，拿不到原因，也无法重选别的标签。
+        """
+        try:
+            await fn()
+        except ValidationError as e:
+            await self.send_json({"type": "error", "message": str(e)[:300]})
+        except Exception as e:  # noqa: BLE001
+            logger.warning("live_attach_failed", error=str(e)[:200])
+            await self.send_json({"type": "error", "message": f"无法切换标签页：{str(e)[:200]}"})
+
     async def _do_attach(self) -> None:
-        tabs = await C.list_tabs(f"http://127.0.0.1:{self.port}")
-        if not tabs:
+        tabs = await self._tabs()
+        top = _top_level(tabs)
+        if not top:
             await self.send_json({"type": "error", "message": "浏览器里没有可显示的标签页"})
             return
-        await self.send_json({"type": "tabs", "tabs": _tabs_payload(tabs), "active": tabs[0].id})
-        await self.attach(tabs[0])
+        await self.send_json({"type": "tabs", "tabs": _tabs_payload(top), "active": top[0].id})
+        await self.attach(top[0])
+
+    def _endpoint(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    async def _tabs(self) -> list[C.Tab]:
+        """含跨进程子帧的完整 target 列表。
+
+        为什么要带子帧：用户在前端点到的 id 可能是 `Page.getFrameTree` 里
+        的某个 frame（或收到过时的 iframe 条目），只在顶层列表里找会误报
+        「该标签页已关闭」。有了完整列表才能把它归回父标签。
+        """
+        return await C.list_tabs(self._endpoint(), include_frames=True)
 
     async def _do_switch(self, tab_id: str) -> None:
-        tabs = await C.list_tabs(f"http://127.0.0.1:{self.port}")
+        tabs = await self._tabs()
+        top = _top_level(tabs)
         target = next((t for t in tabs if t.id == tab_id), None)
         if target is None:
             await self.send_json({"type": "error", "message": "该标签页已关闭"})
-            await self.send_json({"type": "tabs", "tabs": _tabs_payload(tabs)})
+            await self.send_json({"type": "tabs", "tabs": _tabs_payload(top)})
             return
+        if target.parent_id:
+            # 子帧不能直接接 screencast（浏览器会拒绝）：显示它所在的顶层标签
+            parent = C.top_level_of(tabs, tab_id)
+            if parent is None:
+                await self.send_json({"type": "error", "message": "该 iframe 所在的标签页已关闭"})
+                await self.send_json({"type": "tabs", "tabs": _tabs_payload(top)})
+                return
+            target = parent
         await self.attach(target)
 
     async def _do_mouse(self, msg: dict) -> None:
@@ -416,6 +480,11 @@ class _Live:
             "mobile": False,
         })
         self.invalidate_viewport()
+
+
+def _top_level(tabs: list[C.Tab]) -> list[C.Tab]:
+    """前端标签栏只该看到顶层标签：子帧不是能独立展示/接管的"标签"。"""
+    return [t for t in tabs if not t.parent_id and t.type == "page"]
 
 
 def _tabs_payload(tabs: list[C.Tab]) -> list[dict]:

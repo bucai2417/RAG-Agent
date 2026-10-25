@@ -47,6 +47,9 @@ class Tab:
     url: str
     ws_url: str
     type: str = "page"
+    # 仅当 type == "iframe" 时有值：承载它的顶层标签 id。
+    # 带着这个字段的标签是"页面里的一块"，不是可独立展示/接管的标签。
+    parent_id: str | None = None
 
 
 async def browser_version(endpoint: str = DEFAULT_ENDPOINT, *, timeout: float = 3.0) -> dict:
@@ -90,8 +93,21 @@ async def shutdown_browser(endpoint: str = DEFAULT_ENDPOINT, *, timeout: float =
         return False
 
 
-async def list_tabs(endpoint: str = DEFAULT_ENDPOINT, *, timeout: float = 5.0) -> list[Tab]:
-    """列出浏览器里所有页面标签。"""
+async def list_tabs(
+    endpoint: str = DEFAULT_ENDPOINT, *, timeout: float = 5.0, include_frames: bool = False,
+) -> list[Tab]:
+    """列出浏览器里的标签页。
+
+    `include_frames=False`（默认）只返回**顶层标签**。这不是保守，是必须：
+    `/json/list` 里还会冒出跨进程 iframe（OOPIF）条目，它们同样是 `type=page`
+    且带 webSocketDebuggerUrl，但 `Page.startScreencast` 这类命令只允许在
+    顶层 target 上执行，直接连上去会得到
+    `Command can only be executed on top-level targets`。
+    这类条目靠有没有 `parentId` 区分，和 `type` 无关。
+
+    `include_frames=True` 时额外返回这些子帧（`Tab.type == "iframe"`、
+    `Tab.parent_id` 指向顶层标签），供需要钻进 iframe 的调用方使用。
+    """
     import httpx
 
     base = _check_endpoint(endpoint)
@@ -113,11 +129,36 @@ async def list_tabs(endpoint: str = DEFAULT_ENDPOINT, *, timeout: float = 5.0) -
         ws = it.get("webSocketDebuggerUrl")
         if not ws:
             continue
+        parent = it.get("parentId") or None
+        if parent and not include_frames:
+            continue
         out.append(Tab(
             id=it.get("id", ""), title=it.get("title", ""),
-            url=it.get("url", ""), ws_url=ws, type=it.get("type", "page"),
+            url=it.get("url", ""), ws_url=ws,
+            # 有 parentId 的一律按子帧记账，不信任 type 字段
+            type="iframe" if parent else "page",
+            parent_id=parent,
         ))
     return out
+
+
+def top_level_of(tabs: list[Tab], tab_id: str) -> Tab | None:
+    """把任意标签/子帧 id 归到它的顶层标签；归不回去就返回 None。
+
+    `list_tabs(include_frames=True)` 只带一层 parentId，而 iframe 可以嵌套：
+    b 的 parent 若本身是子帧，就继续往上找，直到没有 parentId 的顶层标签。
+    找不到父标签（父页已关闭）时返回 None —— 调用方据此拒绝而不是连带连错。
+    """
+    by_id = {t.id: t for t in tabs}
+    cur = by_id.get(tab_id)
+    seen: set[str] = set()
+    while cur is not None and cur.parent_id:
+        if cur.id in seen:  # 防御环状 parentId，宁可放弃也不死循环
+            return None
+        seen.add(cur.id)
+        cur = by_id.get(cur.parent_id)
+    return cur
+
 
 
 class CDPSession:

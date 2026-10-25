@@ -34,6 +34,8 @@ class AgentUpdate(BaseModel):
     status: str | None = None
     visibility: str | None = None
     default_mode_id: int | None = None
+    # 乐观锁：客户端回传上次读到的 row_version；不传则不做前置校验
+    row_version: int | None = None
 
 
 class AgentOut(BaseModel):
@@ -55,6 +57,8 @@ class AgentOut(BaseModel):
     owner_id: int | None = None
     is_builtin: bool = False
     created_at: datetime
+    # 乐观锁：编辑时原样回传
+    row_version: int = 1
 
     model_config = {"from_attributes": True}
 

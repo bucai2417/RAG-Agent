@@ -34,3 +34,22 @@ class SoftDeleteMixin:
 
 class TenantMixin:
     tenant_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+
+
+class RowVersionMixin:
+    """乐观锁列。
+
+    与业务语义的 ``version``（文档版本号、工作流版本号，用户可见）区分开：
+    这一列只由 SQLAlchemy 维护，用来检测「读到之后被别人改过」。
+    模型侧需同时声明 ``__mapper_args__ = {"version_id_col": ROW_VERSION_COL}``，
+    SQLAlchemy 会把 UPDATE 变成 ``... WHERE id = ? AND row_version = ?``，
+    命中 0 行时抛 ``StaleDataError``（由 app/core/errors 转 409）。
+    """
+
+    row_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+
+
+# 声明 version_id_col 时直接引用列对象：Python 类体内取不到 mixin 的属性名
+ROW_VERSION_COL = RowVersionMixin.row_version

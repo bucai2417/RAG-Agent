@@ -257,7 +257,7 @@ async def db_init(
     body: DbUrlIn,
     user: User = Depends(require_permission("system:manage")),
 ) -> dict:
-    """对目标库建表（create_all + 补列）。用于切换前初始化空库。"""
+    """对目标库迁移到最新 schema（alembic upgrade head）。用于切换前初始化空库。"""
     url = (body.database_url or "").strip()
     if not url:
         raise ValidationError("请填写连接串")
@@ -269,7 +269,7 @@ async def db_init(
         tables = await init_models_for(eng)
         return {"ok": True, "message": f"已建 {len(tables)} 张表", "table_count": len(tables)}
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "message": f"建表失败：{str(e)[:200]}"}
+        return {"ok": False, "message": f"迁移失败：{str(e)[:200]}"}
     finally:
         if eng is not None:
             try:
@@ -318,11 +318,13 @@ async def db_migrate(
     user: User = Depends(require_permission("system:manage")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """对当前主库重跑建表+补列（等价重启时的自动补列）。"""
+    """对当前主库执行 alembic upgrade head（等价重启时的自动迁移）。"""
     from app.core.db import async_engine, init_models_for
+    from app.core.migrations import current_revision
 
     tables = await init_models_for(async_engine)
-    return {"ok": True, "message": f"已同步表结构（{len(tables)} 张表）"}
+    revision = await current_revision(async_engine)
+    return {"ok": True, "message": f"已同步表结构（{len(tables)} 张表）", "revision": revision}
 
 
 # ==================== 备份 / 还原 ====================

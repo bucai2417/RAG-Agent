@@ -34,6 +34,8 @@ export interface KB {
   owner_id?: number
   my_perm?: string
   created_at: string
+  /** 乐观锁：更新时原样回传，被他人改过则返回 409 */
+  row_version?: number
 }
 
 export interface Citation {
@@ -119,6 +121,8 @@ export interface Doc {
   folder_id?: number | null
   tags?: string[] | null
   created_at: string
+  /** 乐观锁：更新标签 / 可见性时原样回传，被他人改过则返回 409 */
+  row_version?: number
 }
 
 export interface Conversation {
@@ -135,12 +139,22 @@ export interface Conversation {
 export interface ContextStats {
   available: boolean
   conversation_id: number | null
-  /** 已占用 token（摘要 + 未压缩原文历史） */
+  /** 压力值：摘要 + 未压缩的全部原文历史，达到 limit_tokens 即触发压缩 */
   used_tokens: number
+  /** 本轮真正会发给模型的量（摘要 + 按预算裁出的原文），与 used_tokens 不同即说明被预算裁剪 */
+  loaded_tokens?: number
+  /** 本轮实际带入的原文条数 */
+  loaded_messages?: number
   /** 触发压缩的阈值，环满即压缩 */
   limit_tokens: number
-  /** 压缩后仍保留的最近消息条数 */
+  /** 模型上下文窗口（自动推断或手动配置） */
+  window_tokens?: number
+  /** 从窗口里给输出预留的 token */
+  output_reserve_tokens?: number
+  /** 压缩后**至少**保留的最近消息条数（下限） */
   keep_recent: number
+  /** 压缩后希望压到的 token 目标（阈值的 35%） */
+  keep_target_tokens?: number
   percent: number
   compressed: boolean
   summary_tokens: number
@@ -149,6 +163,8 @@ export interface ContextStats {
   /** 已被折叠进摘要的消息条数 */
   archived_messages?: number
   compressing: boolean
+  /** 用于推断窗口的对话模型名 */
+  model_name?: string | null
 }
 
 export interface Message {
@@ -311,8 +327,10 @@ export const docApi = {
   batchVisibility: (ids: number[], visibility: string) => http.post('/documents/batch-visibility', { ids, visibility }).then((r) => r.data),
   batchReprocess: (ids: number[]) => http.post('/documents/batch-reprocess', { ids }).then((r) => r.data),
   mergeExportUrl: (fmt: 'docx' | 'pdf' | 'md' | 'txt' = 'docx') => `${API_BASE}/documents/batch-merge-export?fmt=${fmt}`,
-  setTags: (id: number, tags: string[]) => http.put<Doc>(`/documents/${id}/tags`, { tags }).then((r) => r.data),
-  setVisibility: (id: number, visibility: string) => http.patch<Doc>(`/documents/${id}/visibility`, { visibility }).then((r) => r.data),
+  setTags: (id: number, tags: string[], rowVersion?: number) =>
+    http.put<Doc>(`/documents/${id}/tags`, { tags, row_version: rowVersion ?? null }).then((r) => r.data),
+  setVisibility: (id: number, visibility: string, rowVersion?: number) =>
+    http.patch<Doc>(`/documents/${id}/visibility`, { visibility, row_version: rowVersion ?? null }).then((r) => r.data),
   acl: (id: number) => http.get<{ visibility: string; items: { id: number; principal_id: number; effect: string; principal_name?: string | null }[] }>(`/documents/${id}/acl`).then((r) => r.data),
   addAcl: (id: number, data: { principal_type: string; principal_id: number; effect: string }) => http.post(`/documents/${id}/acl`, data).then((r) => r.data),
   removeAcl: (id: number, aclId: number) => http.delete(`/documents/${id}/acl/${aclId}`).then((r) => r.data),
@@ -577,6 +595,8 @@ export interface Agent {
   owner_id?: number
   is_builtin?: boolean
   created_at: string
+  /** 乐观锁：更新时原样回传，被他人改过则返回 409 */
+  row_version?: number
 }
 
 export interface AgentMode {
@@ -1172,7 +1192,9 @@ export const reminderApi = {
 
 export const workflowApi = {
   get: (agentId: number) => http.get<any>(`/agents/${agentId}/workflow`).then((r) => r.data),
-  save: (agentId: number, graph: any) => http.put(`/agents/${agentId}/workflow`, { graph }).then((r) => r.data),
+  // rowVersion：编辑页加载时的 row_version，回传后并发保存会返回 409 而不是后者覆盖前者
+  save: (agentId: number, graph: any, rowVersion?: number) =>
+    http.put(`/agents/${agentId}/workflow`, { graph, row_version: rowVersion ?? null }).then((r) => r.data),
   publish: (agentId: number) => http.post(`/agents/${agentId}/workflow/publish`).then((r) => r.data),
   run: (agentId: number, inputs: Record<string, any>) => http.post(`/agents/${agentId}/workflow/run`, { inputs }).then((r) => r.data),
   getRun: (runId: number) => http.get(`/workflow-runs/${runId}`).then((r) => r.data),

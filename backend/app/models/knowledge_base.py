@@ -17,7 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base, VectorType
-from app.models.base import IdMixin, TenantMixin, TimestampMixin
+from app.models.base import ROW_VERSION_COL, IdMixin, RowVersionMixin, TenantMixin, TimestampMixin
 
 # vis_scope 取值
 VIS_KB_DEFAULT = 0   # 继承知识库可见性
@@ -25,7 +25,7 @@ VIS_KB_PUBLIC = 1    # 知识库公开
 VIS_RESTRICTED = 2   # 受限（读 acl_allow / acl_deny）
 
 
-class KnowledgeBase(Base, IdMixin, TimestampMixin, TenantMixin):
+class KnowledgeBase(Base, IdMixin, TimestampMixin, TenantMixin, RowVersionMixin):
     __tablename__ = "knowledge_base"
 
     name: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -48,6 +48,8 @@ class KnowledgeBase(Base, IdMixin, TimestampMixin, TenantMixin):
     status: Mapped[str] = mapped_column(String(16), default="active")
     owner_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     settings: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    __mapper_args__ = {"version_id_col": ROW_VERSION_COL}
 
 
 class KBMember(Base, IdMixin, TimestampMixin, TenantMixin):
@@ -75,7 +77,7 @@ class DocumentFolder(Base, IdMixin, TimestampMixin, TenantMixin):
     sort: Mapped[int] = mapped_column(Integer, default=0)
 
 
-class Document(Base, IdMixin, TimestampMixin, TenantMixin):
+class Document(Base, IdMixin, TimestampMixin, TenantMixin, RowVersionMixin):
     __tablename__ = "document"
 
     kb_id: Mapped[int] = mapped_column(BigInteger, index=True, nullable=False)
@@ -108,6 +110,8 @@ class Document(Base, IdMixin, TimestampMixin, TenantMixin):
     uploaded_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     parsed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __mapper_args__ = {"version_id_col": ROW_VERSION_COL}
 
 
 class DocumentACL(Base, IdMixin, TimestampMixin):

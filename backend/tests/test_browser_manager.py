@@ -557,3 +557,86 @@ def test_list_tabs_skips_non_page_targets(monkeypatch):
     tabs = asyncio.run(C.list_tabs())
     # 只保留有 ws 的 page/iframe：service_worker 与缺 ws 的条目都跳过
     assert [t.id for t in tabs] == ["a"]
+
+
+# ------------------------------------------------------- 跨进程 iframe 过滤
+
+
+def _frame_listing():
+    """/json/list 的真实形态：OOPIF 同样是 type=page、同样带 ws，只多了 parentId。"""
+    return [
+        {"type": "page", "id": "top", "title": "T", "url": "https://x/",
+         "webSocketDebuggerUrl": "ws://top"},
+        {"type": "page", "id": "oopif", "parentId": "top", "title": "ad",
+         "url": "https://ad.test/", "webSocketDebuggerUrl": "ws://oopif"},
+        {"type": "iframe", "id": "inner", "parentId": "oopif", "title": "nested",
+         "url": "https://inner.test/", "webSocketDebuggerUrl": "ws://inner"},
+    ]
+
+
+def _patch_listing(monkeypatch, items):
+    import httpx
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return items
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url):
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+
+
+def test_list_tabs_excludes_subframes_by_default(monkeypatch):
+    """顶层列表混进子帧会让实时画面报
+    "Command can only be executed on top-level targets"（本机实测），
+    所以默认不返回任何带 parentId 的条目。
+    """
+    import asyncio
+
+    _patch_listing(monkeypatch, _frame_listing())
+    tabs = asyncio.run(C.list_tabs())
+    assert [t.id for t in tabs] == ["top"]
+    assert tabs[0].parent_id is None and tabs[0].type == "page"
+
+
+def test_list_tabs_include_frames_marks_children(monkeypatch):
+    import asyncio
+
+    _patch_listing(monkeypatch, _frame_listing())
+    tabs = asyncio.run(C.list_tabs(include_frames=True))
+    by_id = {t.id: t for t in tabs}
+    assert set(by_id) == {"top", "oopif", "inner"}
+    # OOPIF 的 type 也报 page：子帧身份只能靠 parentId 判定
+    assert by_id["oopif"].type == "iframe" and by_id["oopif"].parent_id == "top"
+    assert by_id["inner"].parent_id == "oopif"
+
+
+def test_top_level_of_walks_nested_parents(monkeypatch):
+    import asyncio
+
+    _patch_listing(monkeypatch, _frame_listing())
+    tabs = asyncio.run(C.list_tabs(include_frames=True))
+    assert C.top_level_of(tabs, "inner").id == "top"   # 嵌套两层也要归到顶层
+    assert C.top_level_of(tabs, "oopif").id == "top"
+    assert C.top_level_of(tabs, "top").id == "top"
+
+
+def test_top_level_of_returns_none_for_unknown_or_orphan():
+    # 父页已关闭时只剩子帧：宁可返回 None 让调用方拒绝，也不能乱连
+    orphan = [C.Tab(id="f", title="", url="", ws_url="ws://f", type="iframe", parent_id="gone")]
+    assert C.top_level_of(orphan, "f") is None
+    assert C.top_level_of(orphan, "nope") is None

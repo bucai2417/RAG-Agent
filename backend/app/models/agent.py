@@ -21,10 +21,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
-from app.models.base import IdMixin, TenantMixin, TimestampMixin
+from app.models.base import ROW_VERSION_COL, IdMixin, RowVersionMixin, TenantMixin, TimestampMixin
 
 
-class Agent(Base, IdMixin, TimestampMixin, TenantMixin):
+class Agent(Base, IdMixin, TimestampMixin, TenantMixin, RowVersionMixin):
     __tablename__ = "agent"
     __table_args__ = (UniqueConstraint("tenant_id", "slug", name="uq_agent_tenant_slug"),)
 
@@ -46,6 +46,8 @@ class Agent(Base, IdMixin, TimestampMixin, TenantMixin):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 平台内置智能体：随系统播种、列表置顶、禁止删除（对话模型仍由界面选择，不预置）
     is_builtin: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+    __mapper_args__ = {"version_id_col": ROW_VERSION_COL}
 
 
 class AgentMode(Base, IdMixin, TimestampMixin, TenantMixin):
@@ -138,7 +140,7 @@ class Tool(Base, IdMixin, TimestampMixin, TenantMixin):
     status: Mapped[str] = mapped_column(String(16), default="active")
 
 
-class Workflow(Base, IdMixin, TimestampMixin, TenantMixin):
+class Workflow(Base, IdMixin, TimestampMixin, TenantMixin, RowVersionMixin):
     """工作流图（属于 workflow 型 Agent）。"""
 
     __tablename__ = "workflow"
@@ -149,6 +151,8 @@ class Workflow(Base, IdMixin, TimestampMixin, TenantMixin):
     version: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(16), default="draft")
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __mapper_args__ = {"version_id_col": ROW_VERSION_COL}
 
 
 class WorkflowRun(Base, IdMixin, TenantMixin):

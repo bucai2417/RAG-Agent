@@ -41,6 +41,22 @@ class ConflictError(AppError):
     code = "conflict"
 
 
+class StaleWriteError(ConflictError):
+    """并发写冲突：记录在本次读取之后已被他人修改（乐观锁 row_version 不匹配）。
+
+    前端应提示「内容已被他人修改」并让用户刷新后再改，而不是静默覆盖。
+    """
+
+    code = "stale_write"
+
+
+class QuotaExceededError(AppError):
+    """配额/容量超限（存储、文档数、分块数）。"""
+
+    status_code = 507
+    code = "quota_exceeded"
+
+
 class RateLimitError(AppError):
     """请求过于频繁 / 账号被锁定（防爆破）。"""
 

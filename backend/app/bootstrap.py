@@ -13,9 +13,20 @@ from app.core.security import hash_password
 from app.models import ModelConfig, ModelProvider, Tenant, User
 
 
+class SchemaMigrationError(RuntimeError):
+    """schema 迁移失败：此时继续启动只会把问题变成满屏 500，应当直接中止。"""
+
+
 async def seed_all() -> None:
-    """幂等播种。已存在的数据跳过。"""
-    await init_models()
+    """幂等播种。已存在的数据跳过。
+
+    迁移失败抛 SchemaMigrationError（调用方应中止启动）；
+    其余播种失败（如某条内置数据写不进去）只影响功能完整性，不阻止启动。
+    """
+    try:
+        await init_models()  # 走 alembic 迁移到最新 schema（见 app/core/migrations.py）
+    except Exception as e:  # noqa: BLE001
+        raise SchemaMigrationError(f"数据库迁移失败：{e}") from e
     async with AsyncSessionLocal() as db:
         tenant = (
             await db.execute(select(Tenant).where(Tenant.slug == "default"))

@@ -2,7 +2,8 @@
   <!--
     上下文占用环：出现在输入框工具栏右侧，与其它 Agent 产品一致。
     - 圆环按 used/limit 填充，接近阈值变黄、达阈值变红。
-    - hover 浮层给出实际数字（已用/上限/摘要/折叠条数），而不是含糊的百分比。
+    - hover 浮层给出实际数字（窗口 / 阈值 / 已用 / 本轮实发 / 摘要 / 折叠条数），
+      而不是含糊的百分比；窗口与阈值同一口径，换模型会自动变。
     - 无会话（草稿）时只显示空心环，提示"发第一条后开始统计"。
   -->
   <el-tooltip placement="top" :show-after="120" effect="light" popper-class="ctx-tip" :disabled="!showTooltip">
@@ -17,17 +18,39 @@
         </div>
         <div class="ctx-rows">
           <div class="ctx-row">
-            <span>已占用</span>
+            <span>已占用（压力）</span>
             <b>{{ fmt(used) }} / {{ fmt(limit) }} tokens</b>
           </div>
           <div class="ctx-row">
             <span>剩余可用</span>
             <b>{{ fmt(remain) }} tokens</b>
           </div>
+          <div v-if="loaded < used" class="ctx-row is-hint">
+            <span>本轮实发</span>
+            <b>{{ fmt(loaded) }} tokens · {{ stats?.loaded_messages ?? 0 }} 条</b>
+          </div>
+        </div>
+        <div class="ctx-divider" />
+        <div class="ctx-rows">
           <div class="ctx-row">
             <span>压缩阈值</span>
             <b>{{ fmt(limit) }} tokens</b>
           </div>
+          <div v-if="stats?.window_tokens" class="ctx-row">
+            <span>模型窗口</span>
+            <b>{{ fmt(stats.window_tokens) }} tokens</b>
+          </div>
+          <div v-if="stats?.model_name" class="ctx-row">
+            <span>模型</span>
+            <b class="ctx-model">{{ stats.model_name }}</b>
+          </div>
+          <div v-if="stats?.output_reserve_tokens" class="ctx-row">
+            <span>输出预留</span>
+            <b>{{ fmt(stats.output_reserve_tokens) }} tokens</b>
+          </div>
+        </div>
+        <div class="ctx-divider" />
+        <div class="ctx-rows">
           <div v-if="stats?.available" class="ctx-row">
             <span>消息条数</span>
             <b>{{ stats.message_count }} 条</b>
@@ -40,9 +63,15 @@
             <span>摘要占用</span>
             <b>{{ fmt(stats.summary_tokens) }} tokens</b>
           </div>
-          <div v-if="stats?.compressed" class="ctx-row">
+          <div class="ctx-row">
             <span>压缩后保留原文</span>
-            <b>最近 {{ stats.keep_recent }} 条</b>
+            <!-- keep_recent 是下限、预算才是上限：两个数字都给，避免读成"固定保留 6 条" -->
+            <b>
+              <template v-if="stats?.keep_target_tokens">
+                预算内自动取 · 目标 {{ fmt(stats.keep_target_tokens) }} tokens
+              </template>
+              <template v-else>预算内自动取 · 至少 {{ stats?.keep_recent ?? 6 }} 条</template>
+            </b>
           </div>
         </div>
         <div class="ctx-state" :class="toneClass">{{ stateText }}</div>
@@ -82,6 +111,8 @@ const R = 13
 const circumference = 2 * Math.PI * R
 
 const used = computed(() => props.stats?.used_tokens ?? 0)
+/** 本轮真正会发出去的量；后端未提供时退回 used */
+const loaded = computed(() => props.stats?.loaded_tokens ?? used.value)
 const limit = computed(() => props.stats?.limit_tokens || 0)
 const remain = computed(() => Math.max(0, limit.value - used.value))
 const compressing = computed(() => !!props.compressing || !!props.stats?.compressing)
@@ -108,11 +139,21 @@ const stateText = computed(() => {
   if (!props.hasConv) return '发送第一条消息后开始统计上下文占用'
   if (compressing.value) return '正在压缩早期对话…'
   if (!props.stats?.available) return '暂无统计'
-  if (pct.value >= 100) return '已达压缩阈值，新一轮将自动压缩早期对话'
+  const clipped = loaded.value < used.value
+  const window = props.stats.window_tokens
+  if (pct.value >= 100) {
+    return clipped
+      ? '已达压缩阈值：本轮已按预算裁剪历史，新一轮将把早期对话折叠进摘要'
+      : '已达压缩阈值，新一轮将自动压缩早期对话'
+  }
   if (props.stats.compressed) {
-    return `已压缩历史；上下文稳定在阈值以内（保留最近 ${props.stats.keep_recent} 条原文）`
+    const base = window
+      ? `已压缩历史；窗口 ${fmt(window)}，阈值 ${fmt(limit.value)}，上下文稳定在阈值以内`
+      : '已压缩历史；上下文稳定在阈值以内'
+    return clipped ? `${base}（本轮按预算取了最近 ${props.stats.loaded_messages ?? 0} 条）` : base
   }
   if (pct.value >= 90) return '接近压缩阈值，很快会自动压缩历史'
+  if (clipped) return `上下文正常；本轮按预算取了最近 ${props.stats.loaded_messages ?? 0} 条原文`
   return '上下文正常'
 })
 
@@ -185,7 +226,7 @@ function fmt(n: number): string {
   background: #ffffff !important;
   border-color: var(--border) !important;
 }
-.ctx-tip .ctx-pop { padding: 10px 12px; min-width: 232px; }
+.ctx-tip .ctx-pop { padding: 10px 12px; min-width: 252px; }
 .ctx-tip .ctx-head {
   display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
   margin-bottom: 7px;
@@ -210,12 +251,20 @@ function fmt(n: number): string {
 .ctx-tip .ctx-bar-fill.is-idle { background: var(--border); }
 
 .ctx-tip .ctx-rows { display: flex; flex-direction: column; gap: 3px; }
+.ctx-tip .ctx-divider {
+  height: 1px; background: var(--border-subtle); margin: 7px 0;
+}
 .ctx-tip .ctx-row {
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
   font-size: 11.5px; color: var(--text-secondary);
 }
 .ctx-tip .ctx-row b {
   color: var(--text-title); font-weight: 500; font-variant-numeric: tabular-nums;
+}
+/* 「本轮实发」只在预算裁剪时出现，是补充信息：压低一档，别和主数字抢注意力 */
+.ctx-tip .ctx-row.is-hint b { color: var(--text-secondary); font-weight: 400; }
+.ctx-tip .ctx-row .ctx-model {
+  max-width: 148px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .ctx-tip .ctx-state {
   margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--border-subtle);

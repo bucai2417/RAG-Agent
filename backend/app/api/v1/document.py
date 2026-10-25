@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.concurrency import check_row_version
 from app.core.db import get_db
 from app.core.errors import NotFoundError, PermissionDeniedError, ValidationError
 from app.core.logging import get_logger
@@ -615,6 +616,7 @@ async def _load_owned_docs_read(db: AsyncSession, user: User, ids: list[int]) ->
 # ===== 文档标签 =====
 class TagsIn(_BatchBM):
     tags: list[str]
+    row_version: int | None = None  # 乐观锁，可选
 
 @router.put("/{doc_id}/tags", response_model=DocumentOut)
 @audited("doc.tags", "document", id_arg="doc_id")
@@ -629,6 +631,7 @@ async def set_document_tags(
         raise NotFoundError("文档不存在")
     kb = await db.get(KnowledgeBase, doc.kb_id)
     await _ensure_edit(db, user, kb)
+    check_row_version(doc, body.row_version)
     # 去重、去空、限长
     seen: list[str] = []
     for t in body.tags:
@@ -970,6 +973,7 @@ class DocAclIn(BaseModel):
 
 class DocVisibilityIn(BaseModel):
     visibility: str  # inherit/public/restricted
+    row_version: int | None = None  # 乐观锁，可选
 
 
 def _principal_of(principal_type: str, principal_id: int) -> int:
@@ -1083,6 +1087,7 @@ async def set_doc_visibility(
         raise NotFoundError("文档不存在")
     kb = await db.get(KnowledgeBase, doc.kb_id)
     await _ensure_edit(db, user, kb)
+    check_row_version(doc, body.row_version)
     if body.visibility not in ("inherit", "public", "restricted"):
         raise PermissionDeniedError("visibility 只能为 inherit/public/restricted")
     doc.visibility = body.visibility
@@ -1309,6 +1314,7 @@ async def update_entry(
         raise NotFoundError("图文条目不存在")
     kb = await db.get(KnowledgeBase, doc.kb_id)
     await _ensure_edit(db, user, kb)
+    check_row_version(doc, body.get("row_version"))
     if "title" in body and body["title"]:
         doc.title = str(body["title"]).strip()[:200]
     if "content" in body and body["content"] is not None:

@@ -79,14 +79,31 @@ FIELD_META: dict[str, dict[str, Any]] = {
                      "help": "配置后技能搜索配额由 10 次/分钟升至 30 次/分钟；只读公开仓库无需勾选任何 scope"},
     "vector_max_scan": {"label": "向量扫描上限（0=不限）", "group": "retrieval", "kind": "int"},
     # ---- 上下文压缩 ----
+    "context_window_tokens": {
+        "label": "模型上下文窗口（token）", "group": "retrieval", "kind": "int",
+        "help": "该会话所使用模型的上下文窗口。0 = 按模型名自动推断"
+                "（gpt-4o 128k、deepseek 64k、qwen 32k、本地小模型 8k…）。"
+                "压缩阈值由它推导，换模型不必再手改阈值",
+    },
+    "context_window_ratio": {
+        "label": "压缩阈值占窗口比例", "group": "retrieval", "kind": "float",
+        "help": "默认 0.7，余量留给输出、检索资料与工具定义。调大能更充分地利用窗口，"
+                "但过大会让单轮请求贴近上限（0.3~0.95）",
+    },
+    "context_output_reserve_tokens": {
+        "label": "输出预留（token）", "group": "retrieval", "kind": "int",
+        "help": "从阈值里扣掉给模型输出的空间，默认 4096；超过窗口 25% 时按 25% 计",
+    },
     "context_compress_threshold": {
-        "label": "上下文压缩阈值（token）", "group": "retrieval", "kind": "int",
+        "label": "上下文压缩阈值（token，0=自动）", "group": "retrieval", "kind": "int",
         "help": "会话上下文超过该值就把早期对话摘要成一段，只保留最近若干条原文。"
-                "问答页输入框右侧圆环满格即触发；0 = 用内置默认 4000",
+                "0 = 自动（窗口 × 比例 − 输出预留）；填正数则固定使用该值。"
+                "问答页输入框右侧圆环满格即触发压缩",
     },
     "context_keep_recent": {
-        "label": "压缩后保留最近消息数", "group": "retrieval", "kind": "int",
-        "help": "压缩完成后仍以原文保留的消息条数（越多越不丢细节，但也更占上下文）；0 = 用内置默认 6",
+        "label": "压缩后至少保留最近消息数", "group": "retrieval", "kind": "int",
+        "help": "压缩完成后**至少**以原文保留的消息条数（下限）。"
+                "实际保留多少由 token 预算决定——只要预算够，会保留更多轮次。0 = 默认 6",
     },
     # ---- 在线更新 ----
     "update_check_enabled": {"label": "允许检查更新", "group": "advanced", "kind": "bool",
@@ -161,7 +178,19 @@ FIELD_META: dict[str, dict[str, Any]] = {
     "default_embedding_model": {"label": "默认向量模型", "group": "provider", "kind": "str"},
     # ---- 高级（谨慎）----
     "database_url": {"label": "数据库连接串", "group": "advanced", "kind": "secret", "restart": True,
-                     "help": "改动需重启；请确保目标库可用，否则服务将无法启动"},
+                     "help": "改动需重启；重启时会自动迁移到最新 schema，失败则回退到原库"},
+    "db_pool_size": {"label": "连接池大小", "group": "advanced", "kind": "int", "restart": True,
+                     "help": "仅 PostgreSQL/MySQL 生效；多副本时总连接数不要超过数据库 max_connections"},
+    "db_max_overflow": {"label": "连接池溢出上限", "group": "advanced", "kind": "int", "restart": True,
+                        "help": "池满后允许临时新建的连接数；耗尽后请求等待 pool_timeout 秒"},
+    "db_pool_timeout": {"label": "取连接超时（秒）", "group": "advanced", "kind": "int", "restart": True,
+                        "help": "等不到空闲连接时返回 503，而不是无限挂起"},
+    "db_pool_recycle": {"label": "连接回收（秒）", "group": "advanced", "kind": "int", "restart": True,
+                        "help": "防止防火墙/中间件掐断空闲连接导致首批请求失败"},
+    "db_busy_timeout": {"label": "SQLite 写锁等待（秒）", "group": "advanced", "kind": "int", "restart": True,
+                        "help": "SQLite 单写者；调大可减少 database is locked"},
+    "db_auto_migrate": {"label": "启动时自动迁移", "group": "advanced", "kind": "bool", "restart": True,
+                        "help": "关闭后需自行执行 alembic upgrade head"},
     "vector_backend": {"label": "向量后端", "group": "advanced", "kind": "str", "restart": True,
                        "help": "auto / pgvector / numpy"},
     "embedding_dim": {"label": "向量维度", "group": "advanced", "kind": "int", "restart": True,

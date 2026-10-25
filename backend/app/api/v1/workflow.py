@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.concurrency import check_row_version
 from app.core.db import AsyncSessionLocal, get_db
 from app.core.errors import ConflictError, NotFoundError
 from app.core.logging import get_logger
@@ -26,6 +27,8 @@ router = APIRouter(tags=["workflow"])
 class GraphIn(BaseModel):
     graph: dict
     name: str | None = None
+    # 乐观锁：客户端回传上次读到的 row_version；不传则不做前置校验
+    row_version: int | None = None
 
 
 class RunIn(BaseModel):
@@ -98,7 +101,13 @@ async def get_workflow(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     _, wf = await _get_agent_workflow(db, agent_id, user.tenant_id)
-    return {"id": wf.id, "graph": wf.graph or {"nodes": [], "edges": []}, "version": wf.version, "status": wf.status}
+    return {
+        "id": wf.id,
+        "graph": wf.graph or {"nodes": [], "edges": []},
+        "version": wf.version,
+        "status": wf.status,
+        "row_version": wf.row_version,
+    }
 
 
 @router.put("/agents/{agent_id}/workflow")
@@ -112,6 +121,7 @@ async def save_workflow(
     from app.agents.workflow.engine import validate_graph
 
     _, wf = await _get_agent_workflow(db, agent_id, user.tenant_id)
+    check_row_version(wf, body.row_version)
     # 允许保存空图（编辑中）；非空则校验
     if body.graph.get("nodes"):
         validate_graph(body.graph)
@@ -119,7 +129,7 @@ async def save_workflow(
     if body.name:
         wf.name = body.name
     await db.flush()
-    return {"message": "已保存", "version": wf.version}
+    return {"message": "已保存", "version": wf.version, "row_version": wf.row_version}
 
 
 @router.post("/agents/{agent_id}/workflow/publish")
@@ -144,7 +154,14 @@ async def publish_workflow(
         db, wf=wf, user_id=user.id, note=(body or {}).get("note") if body else None,
     )
     await db.flush()
-    return {"message": "已发布", "version": wf.version, "snapshot_id": snap.id}
+    # row_version 也要回传：发布同样是一条 UPDATE，不返回会让前端拿旧版本
+    # 继续保存，从而误判成并发冲突（409）
+    return {
+        "message": "已发布",
+        "version": wf.version,
+        "snapshot_id": snap.id,
+        "row_version": wf.row_version,
+    }
 
 
 @router.get("/agents/{agent_id}/workflow/versions")

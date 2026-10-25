@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.concurrency import check_row_version
 from app.core.db import get_db
 from app.core.errors import NotFoundError, PermissionDeniedError
 from app.middleware.auth_dep import get_principal_set, load_principal_set, require_permission
@@ -108,7 +109,9 @@ async def update_kb(
         raise NotFoundError("知识库不存在")
     if not await _can_manage(db, user, kb):
         raise PermissionDeniedError("无管理权限")
+    check_row_version(kb, body.row_version)
     patch = body.model_dump(exclude_unset=True)
+    patch.pop("row_version", None)
     if "connector_config" in patch:
         # api_key 已是密文则保留，否则加密；clear 则整体清空
         patch["connector_config"] = _encrypt_connector(patch["connector_config"], existing=kb.connector_config)

@@ -188,6 +188,9 @@ const canEdit = computed(() => auth.hasPermission('workflow:edit') || auth.hasPe
 
 const agent = ref<Agent | null>(null)
 const version = ref(1)
+// 乐观锁版本：load 时记下，每次保存成功后用返回值刷新，
+// 这样「A 打开 → B 保存 → A 保存」会 409 提示，而不是把 B 的改动覆盖掉
+const rowVersion = ref<number | undefined>(undefined)
 const graph = ref<any>({ nodes: [], edges: [] })
 const selectedId = ref<string | null>(null)
 const nodeStatus = ref<Record<string, string>>({})
@@ -227,7 +230,7 @@ async function saveAsTemplate() {
   }
   try {
     // 先保存当前图，避免模板存的是旧版本
-    await workflowApi.save(agentId, graph.value)
+    rowVersion.value = (await workflowApi.save(agentId, graph.value, rowVersion.value))?.row_version ?? rowVersion.value
     const r = await workflowApi.saveAsTemplate(agentId, { name, category: '自定义' })
     ElMessage.success(`已保存模板「${r.name}」（${r.node_count} 个节点）`)
   } catch (e) {
@@ -270,6 +273,7 @@ async function load() {
     agent.value = await agentApi.get(agentId)
     const wf = await workflowApi.get(agentId)
     version.value = wf.version
+    rowVersion.value = wf.row_version
     const hasNodes = wf.graph?.nodes?.length
     graph.value = hasNodes ? wf.graph : SAMPLE_GRAPH
   } catch (e) {
@@ -294,7 +298,8 @@ function addNode(type: string) {
 
 async function save() {
   try {
-    await workflowApi.save(agentId, graph.value)
+    const r = await workflowApi.save(agentId, graph.value, rowVersion.value)
+    rowVersion.value = r?.row_version ?? rowVersion.value
     ElMessage.success('已保存')
   } catch (e) {
     ElMessage.error(errMsg(e))
@@ -303,8 +308,12 @@ async function save() {
 
 async function publish() {
   try {
-    await workflowApi.save(agentId, graph.value)
+    const saved = await workflowApi.save(agentId, graph.value, rowVersion.value)
+    rowVersion.value = saved?.row_version ?? rowVersion.value
     const r = await workflowApi.publish(agentId)
+    // 发布本身也是一次 UPDATE（会 bump row_version），必须同步本地版本，
+    // 否则发布后第一次保存会被自己的旧版本判成 409
+    rowVersion.value = r?.row_version ?? rowVersion.value
     version.value = r.version
     ElMessage.success('已发布 v' + r.version)
   } catch (e) {

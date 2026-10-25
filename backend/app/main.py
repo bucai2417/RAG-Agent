@@ -109,6 +109,24 @@ async def lifespan(app: FastAPI):
             await apply_overrides(_db)
     except Exception:  # noqa: BLE001
         logger.exception("settings_overrides_failed")
+
+    # 系统设置里的 database_url 到这一步才生效（engine 在模块导入时就已建立）。
+    # 若不一致则重建 engine 并把新库迁移到最新 schema，否则「Web 端切库 + 重启」
+    # 会在下一次启动悄悄退回旧库。
+    try:
+        import app.core.db as _dbm
+
+        if await _dbm.sync_engine_with_settings():
+            from app.core.migrations import prepare_database
+
+            await prepare_database(_dbm.async_engine)
+            logger.warning(
+                "engine_rebuilt_from_settings",
+                url=settings.database_url.split("@")[-1],
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("engine_resync_failed")
+
     if settings.task_backend == "memory":
         await start_workers(2)
 
@@ -316,6 +334,16 @@ async def health() -> dict:
         checks["bg_tasks"] = pending_count()
     except Exception:  # noqa: BLE001
         pass
+
+    # schema 版本（确认迁移是否已落地；供运维在升级后核对）
+    try:
+        import app.core.db as _dbm
+
+        from app.core.migrations import current_revision
+
+        checks["schema_revision"] = await current_revision(_dbm.async_engine)
+    except Exception:  # noqa: BLE001
+        checks["schema_revision"] = "unknown"
 
     # 任务队列（memory 后端）
     checks["task_backend"] = settings.task_backend

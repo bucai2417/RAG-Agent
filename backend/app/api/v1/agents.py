@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.concurrency import check_row_version
 from app.core.db import AsyncSessionLocal, get_db
 from app.core.errors import ConflictError, NotFoundError
 from app.middleware.auth_dep import get_current_user, get_principal_set, load_principal_set, require_permission
@@ -117,7 +118,10 @@ async def update_agent(
     db: AsyncSession = Depends(get_db),
 ) -> Agent:
     a = await _get_agent(db, agent_id, user.tenant_id)
-    for k, v in body.model_dump(exclude_unset=True).items():
+    check_row_version(a, body.row_version)
+    patch = body.model_dump(exclude_unset=True)
+    patch.pop("row_version", None)
+    for k, v in patch.items():
         setattr(a, k, v)
     await db.flush()
     return a

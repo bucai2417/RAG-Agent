@@ -49,9 +49,10 @@ def test_cron_bad_expr():
 async def _run_compress():
     from sqlalchemy import select
 
+    from app.core.config import settings
     from app.core.db import AsyncSessionLocal, init_models
     from app.models import Conversation, Message, Tenant, User
-    from app.services.context_service import KEEP_RECENT, load_context, maybe_compress
+    from app.services.context_service import load_context, maybe_compress
 
     await init_models()
     async with AsyncSessionLocal() as db:
@@ -84,6 +85,11 @@ async def _run_compress():
     async def _fake_get_llm(db, **kw):
         return _FakeLLM(), _RM()
 
+    # 阈值固定成 4000：本用例验证的是压缩机制本身，不是阈值如何从模型窗口推导
+    # （推导逻辑见 test_context_budget.py）。不固定的话默认阈值会随窗口变大而升高，
+    # 20 条消息就压不动了，用例会随配置漂移。
+    orig_threshold = settings.context_compress_threshold
+    settings.context_compress_threshold = 4000
     orig = reg.get_llm
     reg.get_llm = _fake_get_llm
     try:
@@ -94,19 +100,20 @@ async def _run_compress():
             assert conv2.summary == "这是摘要"
             assert conv2.summary_upto_message_id is not None
             watermark = conv2.summary_upto_message_id
-        # 二次调用不重复压缩（水位已到，to_summarize 为空）
+        # 二次调用不重复压缩（水位已到，剩余原文没再超阈值）
         async with AsyncSessionLocal() as db:
-            # 现有消息都已 <= 水位（除最近 KEEP_RECENT 条），不产生新的摘要
             conv3 = await db.get(Conversation, cid)
             assert conv3.summary_upto_message_id == watermark
-        # load_context 返回摘要 + 最近消息
+        # load_context 返回摘要 + 按预算取出的原文（条数为下限约束，不是固定 6 条）
         async with AsyncSessionLocal() as db:
             conv4 = await db.get(Conversation, cid)
             summary, history = await load_context(db, conv4)
             assert summary and "摘要" in summary
-            assert len(history) <= KEEP_RECENT
+            assert history
+            assert estimate_messages(history) <= 4000
     finally:
         reg.get_llm = orig
+        settings.context_compress_threshold = orig_threshold
     print("OK compress")
 
 

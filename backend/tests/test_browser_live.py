@@ -8,9 +8,15 @@
 """
 from __future__ import annotations
 
+import asyncio
+import json
+
 import pytest
 
+from app.api.v1 import browser_live as V
+from app.core.errors import ValidationError
 from app.services import browser_live as L
+from app.services import cdp_client as C
 
 
 # ---------------------------------------------------------------- 坐标换算
@@ -272,3 +278,84 @@ class TestFrameThrottle:
         t = L.FrameThrottle(min_interval_ms=0)
         assert t.should_send(0.0) is True
         assert t.should_send(0.0) is True
+
+
+# ---------------------------------------------------------------- 会话接管
+
+
+class _FakeWS:
+    """只记录发出内容的 WebSocket 替身（send_json/send_frame 都用得到）。"""
+
+    def __init__(self) -> None:
+        self.texts: list[dict] = []
+        self.binaries: list[bytes] = []
+
+    async def send_text(self, raw: str) -> None:
+        self.texts.append(json.loads(raw))
+
+    async def send_bytes(self, data: bytes) -> None:
+        self.binaries.append(data)
+
+
+class TestAttachGuards:
+    """回归：切到一个跨进程 iframe 的 target id 时，曾直接抛
+    "CDP 错误：Command can only be executed on top-level targets"，
+    并把整条 WS 一起带崩。现在必须在 attach 之前就拦住。"""
+
+    def _live(self) -> tuple[V._Live, _FakeWS]:
+        ws = _FakeWS()
+        return V._Live(ws, 9222), ws  # type: ignore[arg-type]
+
+    def test_attach_rejects_subframe_without_opening_connection(self, monkeypatch):
+        live, _ws = self._live()
+        opened: list[str] = []
+
+        class _Sess:
+            def __init__(self, url, **kw):
+                opened.append(url)
+
+        monkeypatch.setattr(C, "CDPSession", _Sess)
+        frame = C.Tab(id="f", title="广告", url="https://ad/", ws_url="ws://f",
+                      type="iframe", parent_id="top")
+        with pytest.raises(ValidationError):
+            asyncio.run(live.attach(frame))
+        assert opened == []  # 连都不该连：子帧上 screencast 必失败
+        assert live.sess is None
+
+    def test_switch_to_frame_id_resolves_to_parent(self, monkeypatch):
+        live, _ws = self._live()
+        listing = [
+            C.Tab(id="top", title="主页", url="https://x/", ws_url="ws://top"),
+            C.Tab(id="f", title="广告", url="https://ad/", ws_url="ws://f",
+                  type="iframe", parent_id="top"),
+        ]
+        attached: list[C.Tab] = []
+
+        async def fake_tabs():
+            return listing
+
+        async def fake_attach(tab):
+            attached.append(tab)
+
+        monkeypatch.setattr(live, "_tabs", fake_tabs)
+        monkeypatch.setattr(live, "attach", fake_attach)
+        asyncio.run(live._do_switch("f"))
+        assert [t.id for t in attached] == ["top"]
+
+    def test_switch_to_unknown_id_reports_and_lists_top_level(self, monkeypatch):
+        live, ws = self._live()
+        listing = [
+            C.Tab(id="top", title="主页", url="https://x/", ws_url="ws://top"),
+            C.Tab(id="f", title="广告", url="https://ad/", ws_url="ws://f",
+                  type="iframe", parent_id="top"),
+        ]
+
+        async def fake_tabs():
+            return listing
+
+        monkeypatch.setattr(live, "_tabs", fake_tabs)
+        asyncio.run(live._do_switch("gone"))
+        assert ws.texts[0]["type"] == "error"
+        # 标签栏只回顶层：子帧不是可点击的"标签"
+        assert [t["id"] for t in ws.texts[1]["tabs"]] == ["top"]
+

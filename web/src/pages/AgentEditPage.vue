@@ -392,6 +392,8 @@ async function save() {
       model_config_id: form.model_config_id, kb_ids: form.kb_ids, skill_ids: form.skill_ids,
       config: { temperature: form.temperature, greeting: form.greeting, params: { ...skillParams } },
       tool_config: toolConfig,
+      // 乐观锁：带上本次加载时的版本，别人在这期间改过就返回 409 而不是覆盖掉
+      row_version: agent.value?.row_version,
     } as any)
     ElMessage.success('已保存')
     load()

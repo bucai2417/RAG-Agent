@@ -39,17 +39,24 @@ services:
     environment:
       # 后端据此走 docker 更新分支（下载 *-docker.zip 并覆盖 /app）
       RAG_DEPLOYMENT: docker
-      # 默认 SQLite：数据在 /app/backend/data（由 ./rag-web 挂载持久化）
+      # 默认 SQLite：数据在 /app/backend/data（由 ./rag-web 挂载持久化）。
+      # 切 PostgreSQL：写进 .env（见下方 pg profile 注释），无需改本文件。
       DATABASE_URL: ${DATABASE_URL:-sqlite+aiosqlite:////app/backend/data/rag.db}
+      # auto = 按库类型自动决定（PG → pgvector，SQLite → numpy），无需手配
       VECTOR_BACKEND: ${VECTOR_BACKEND:-auto}
       EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
       SECRET_KEY: ${SECRET_KEY:-change-me-to-a-long-random-string-in-production}
-      # 用 pg profile 时把下面两行取消注释（或写进 .env）
-      # DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/rag
-      # VECTOR_BACKEND: pgvector
+      # 连接池（仅 PG 生效）。多副本时按「副本数 × (pool+overflow) ≤ PG max_connections」调
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
     volumes:
       # 单目录挂载：源码 + 前端 + 数据 + 更新区都在 /app
       - ./rag-web:/app
+    # 用 --profile pg 启动时，等数据库健康后再起应用（首次迁移需要库可用）
+    depends_on:
+      db:
+        condition: service_healthy
+        required: false
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:6677/health',timeout=4)"]
       interval: 30s

@@ -18,10 +18,29 @@ from app.main import app as _app
 def main() -> None:
     # 首次运行自动初始化（幂等：已有数据则跳过），确保内置 admin 与角色存在。
     # 同时叠加 Web 端「系统设置」的覆盖值（端口等启动期项在此之后读取才生效）。
+    from app.bootstrap import SchemaMigrationError
+
     try:
         asyncio.run(seed_all())
+    except SchemaMigrationError as e:
+        # schema 迁移失败必须中止：带着旧 schema 跑只会把「升级失败」变成满屏 500，
+        # 而且下一次启动还是同样的错，越跑越难排查。
+        import sys
+        import traceback
+
+        traceback.print_exc()
+        print(f"[bootstrap] {e}，启动中止。", file=sys.stderr)
+        print(
+            "[bootstrap] 排查建议：\n"
+            "  1) 确认 DATABASE_URL 指向的库可连接；\n"
+            "  2) 执行 `python -m alembic upgrade head` 查看具体迁移错误；\n"
+            "  3) 若确实要跳过自动迁移启动，设置 RAG_SKIP_MIGRATIONS=1。",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from e
     except Exception as e:  # noqa: BLE001
-        print(f"[bootstrap] 初始化跳过/失败: {e}")
+        # 播种失败（如某条内置数据）不阻止启动：服务仍可用，缺的东西可在 Web 端补
+        print(f"[bootstrap] 初始化部分失败（不影响启动）: {e}")
 
     from app.core.config import settings
 

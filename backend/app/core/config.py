@@ -108,6 +108,18 @@ class Settings(BaseSettings):
 
     # 数据库
     database_url: str = f"sqlite+aiosqlite:///{(DATA_DIR / 'rag.db').as_posix()}"
+    # 连接池（非 SQLite）。PG 单副本 20~30 足够；多副本时按
+    # 「副本数 × (pool_size + max_overflow)」不超 PG 的 max_connections 来配。
+    db_pool_size: int = 20
+    db_max_overflow: int = 10
+    db_pool_timeout: int = 30       # 等连接超时（秒），超时报 503 而不是无限挂起
+    db_pool_recycle: int = 1800     # 连接回收（秒），防中间件/防火墙掐断空闲连接
+    # SQLite 专用：遇到写锁时等待多久（秒）。SQLite 单写者，调大能减少 500。
+    db_busy_timeout: int = 15
+    # 配合 PgBouncer 等外部连接池时开启（asyncpg statement cache 与 transaction 模式不兼容）
+    db_disable_asyncpg_stmt_cache: bool = False
+    # 启动期是否自动执行 alembic 迁移（false 可跳过；跳过时需自行保证 schema 已就绪）
+    db_auto_migrate: bool = True
 
     # 向量
     vector_backend: str = "auto"  # auto | pgvector | numpy
@@ -131,10 +143,15 @@ class Settings(BaseSettings):
     embedding_fallback_local: bool = True  # 上游 embedding 失败时回退到本地 local_hash（保证入库）
     provider_health_interval_min: int = 30  # Provider 健康检查周期（分钟，0=关闭）
     inject_capabilities_default: bool = True  # 向 AI 注入「平台能力 + 账号权限」摘要
-    # 上下文压缩：会话历史超过阈值时把早期对话摘要进 Conversation.summary，只保留最近 N 条原文。
+    # 上下文压缩：会话历史超过阈值时把早期对话摘要进 Conversation.summary，只保留最近若干条原文。
+    # 阈值默认「按模型窗口自动推导」：窗口 × context_window_ratio − 输出预留，
+    # 换模型不用再手改数字（小窗口模型自动保守，大窗口模型不会 3 轮就压缩）。
     # 输入框右侧的圆形占用环用的就是这个阈值，改这里环口也跟着变。
-    context_compress_threshold: int = 4000   # 触发压缩的 token 阈值（0=用内置默认 4000）
-    context_keep_recent: int = 6             # 压缩后仍以原文保留的最近消息条数（0=用内置默认 6）
+    context_window_tokens: int = 0             # 模型上下文窗口；0=按模型名自动推断
+    context_window_ratio: float = 0.7          # 压缩阈值占窗口的比例（0.3~0.95）
+    context_output_reserve_tokens: int = 4096  # 给模型输出预留的 token（上限为窗口的 25%）
+    context_compress_threshold: int = 0        # 触发压缩的 token 阈值；0=自动（窗口 × 比例 − 输出预留）
+    context_keep_recent: int = 6               # 压缩后**至少**以原文保留的最近消息条数（0=用内置默认 6）
     github_token: str = ""  # 搜索技能用（GitHub API Token）；配置后 search 限流 10→30 次/分钟
     # 在线更新检查
     update_check_enabled: bool = True   # 是否允许「检查更新」

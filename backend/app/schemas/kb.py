@@ -31,6 +31,8 @@ class KBUpdate(BaseModel):
     index_mode: str | None = None
     connector_kind: str | None = None
     connector_config: dict | None = None
+    # 乐观锁：客户端回传上次读到的 row_version；不传则不做前置校验
+    row_version: int | None = None
 
 
 class ConnectorTestIn(BaseModel):
@@ -62,6 +64,8 @@ class KBOut(BaseModel):
     owner_id: int | None = None
     my_perm: str | None = None  # 当前用户对该库的有效级别 owner/manager/editor/viewer（仅详情接口填）
     created_at: datetime
+    # 乐观锁：编辑时需原样回传，否则并发修改会被拒绝
+    row_version: int = 1
 
     model_config = {"from_attributes": True}
 
@@ -97,6 +101,8 @@ class DocumentOut(BaseModel):
     chunk_count: int
     tags: list[str] | None = None
     created_at: datetime
+    # 乐观锁：编辑时需原样回传，否则并发修改会被拒绝
+    row_version: int = 1
 
     model_config = {"from_attributes": True}
 

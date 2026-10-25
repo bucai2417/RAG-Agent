@@ -35,6 +35,15 @@ hiddenimports = [
     "app.main",
     "app.bootstrap",
     "app.models",                    # 动态 import 注册所有表
+    "app.core.migrations",           # 启动期迁移入口（动态 import alembic）
+    "alembic",
+    "alembic.config",
+    "alembic.command",
+    "alembic.script",
+    "alembic.runtime.migration",
+    "alembic.runtime.plugins",
+    "alembic.ddl.sqlite",
+    "alembic.ddl.postgresql",
     "aiosqlite",
     "greenlet",
     "sqlalchemy.dialects.sqlite.aiosqlite",
@@ -52,6 +61,16 @@ hiddenimports = [
     "lxml.etree",
     "markdown",
 ]
+
+# Alembic 迁移脚本属于运行时数据：alembic/env.py 与 versions/*.py 必须随包分发，
+# 否则冻结版启动时会走「找不到 alembic → create_all」的降级路径。
+ALEMBIC_INI = BACKEND_DIR / "alembic.ini"
+ALEMBIC_DIR = BACKEND_DIR / "alembic"
+if ALEMBIC_INI.is_file() and (ALEMBIC_DIR / "env.py").is_file():
+    datas.append((str(ALEMBIC_INI), "."))
+    datas.append((str(ALEMBIC_DIR), "alembic"))
+else:
+    print(f"[WARN] alembic 缺失，冻结版将退化为 create_all：{ALEMBIC_DIR}")
 
 block_cipher = None
 

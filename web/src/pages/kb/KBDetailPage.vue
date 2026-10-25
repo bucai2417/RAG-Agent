@@ -1079,6 +1079,8 @@ async function saveKb() {
       name: kbForm.name.trim(), description: kbForm.description,
       visibility: kbForm.visibility as KB['visibility'],
       index_mode: kbForm.index_mode as KB['index_mode'],
+      // 乐观锁：带上本次加载时的版本，别人在这期间改过就返回 409
+      row_version: kb.value?.row_version,
     })
     ElMessage.success('已保存')
     kbDialog.value = false
@@ -1086,7 +1088,7 @@ async function saveKb() {
 }
 async function setKbEmbedding(modelId: number | null) {
   try {
-    kb.value = await kbApi.update(kbId, { embedding_model_id: modelId })
+    kb.value = await kbApi.update(kbId, { embedding_model_id: modelId, row_version: kb.value?.row_version })
     ElMessage.success(modelId ? '已切换向量模型，旧文档需「重新处理」才会用新模型重嵌入' : '已恢复默认向量模型')
   } catch (e) { ElMessage.error(errMsg(e)) }
 }
@@ -1307,7 +1309,8 @@ async function mergeExport(fmt: string) {
 
 // ---------- 单文档操作 ----------
 async function setVisibility(d: Doc, v: string) {
-  try { await docApi.setVisibility(d.id, v); ElMessage.success('已更新可见性'); loadDocs() } catch (e) { ElMessage.error(errMsg(e)) }
+  // 回传 row_version：若列表加载后别人改过这篇文档，这里会拿到 409 而不是静默覆盖
+  try { await docApi.setVisibility(d.id, v, d.row_version); ElMessage.success('已更新可见性'); loadDocs() } catch (e) { ElMessage.error(errMsg(e)) }
 }
 async function reprocessDoc(d: Doc) {
   try { await docApi.reprocess(d.id); ElMessage.info('已重新提交处理'); loadDocs() } catch (e) { ElMessage.error(errMsg(e)) }
@@ -1452,7 +1455,7 @@ function openTags(d: Doc) {
 async function saveTags() {
   if (!tagDoc.value) return
   try {
-    await docApi.setTags(tagDoc.value.id, tagModel.value.slice(0, 20))
+    await docApi.setTags(tagDoc.value.id, tagModel.value.slice(0, 20), tagDoc.value.row_version)
     ElMessage.success('已保存标签')
     tagDoc.value = null
     loadDocs()
