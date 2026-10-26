@@ -91,6 +91,106 @@ def test_prepare_database_adopts_legacy_schema(tmp_path):
     con.close()
 
 
+def _build_legacy_db(path, *, drop_indexes: tuple[str, ...] = ()) -> None:
+    """造一个「有表没 alembic_version」的老库，可选地删掉若干索引。
+
+    删索引模拟真实老库：``create_all`` 只建表，历史版本里后续新增的索引
+    从未落到库上（``alembic_version`` 又是 stamp 到 head 的）。
+    """
+    url = f"sqlite+aiosqlite:///{path.as_posix()}"
+    eng = dbm.make_engine(url)
+
+    async def _build():
+        import app.models  # noqa: F401
+        async with eng.begin() as conn:
+            await conn.run_sync(dbm.Base.metadata.create_all)
+        await eng.dispose()
+
+    _ev(_build())
+    if drop_indexes:
+        con = sqlite3.connect(path)
+        for name in drop_indexes:
+            con.execute(f"DROP INDEX IF EXISTS {name}")
+        con.commit()
+        con.close()
+
+
+def test_legacy_adoption_creates_missing_indexes(tmp_path):
+    """老库接管必须补上「模型声明了、库里没有」的索引。
+
+    ``_adopt_legacy_schema`` 只做 create_all（补表）+ 补列 + stamp 到 head，
+    stamp 跳过了所有历史 revision，因此索引永远不会被补上。真实故障：
+    开发库 ``alembic_version`` 已是 head，而 ``chat_room`` 的两条唯一索引
+    压根不存在 —— 靠唯一约束兜底的并发修复（P0-4）在升级用户上完全失效。
+    """
+    path = tmp_path / "idx.db"
+    dropped = ("uq_chat_room_direct_pair", "uq_chat_room_tenant_default", "ix_agent_is_builtin")
+    _build_legacy_db(path, drop_indexes=dropped)
+
+    con = sqlite3.connect(path)
+    before = {r[0] for r in con.execute("select name from sqlite_master where type='index'")}
+    con.close()
+    assert not (set(dropped) & before), "前置条件：索引应已被删掉"
+
+    url = f"sqlite+aiosqlite:///{path.as_posix()}"
+    eng = dbm.make_engine(url)
+
+    async def _adopt():
+        res = await prepare_database(eng, url=url)
+        await eng.dispose()
+        return res
+
+    assert _ev(_adopt())["action"] == "adopted"
+
+    con = sqlite3.connect(path)
+    after = {r[0] for r in con.execute("select name from sqlite_master where type='index'")}
+    con.close()
+    assert set(dropped) <= after, f"接管后仍缺索引: {set(dropped) - after}"
+
+
+def test_legacy_adoption_reports_index_blocked_by_duplicate_rows(tmp_path):
+    """存量重复数据挡住唯一索引时：接管要成功，但必须把它报出来。
+
+    静默跳过是危险的——应用层会以为「有唯一约束兜底」，实际在并发下裸奔。
+    因此这里要求结果里能查到被跳过的索引名，供启动日志告警。
+    """
+    from app.core.db import sync_missing_indexes
+
+    path = tmp_path / "dupidx.db"
+    # 同时删掉一个无关索引：用来证明「某条建不上」不会中断其余索引的补建
+    _build_legacy_db(
+        path, drop_indexes=("uq_chat_room_tenant_default", "ix_agent_is_builtin"),
+    )
+
+    con = sqlite3.connect(path)
+    # 同一租户两个「活跃的默认大群」：部分唯一索引必然建不上
+    for _ in range(2):
+        con.execute(
+            "insert into chat_room (tenant_id, name, kind, owner_id, is_default, "
+            "message_count, status, created_at, updated_at) values "
+            "(7, 'g', 'group', 0, 1, 0, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+    con.commit()
+
+    eng = dbm.make_engine(f"sqlite+aiosqlite:///{path.as_posix()}")
+
+    async def _sync():
+        async with eng.connect() as conn:
+            return await conn.run_sync(dbm.sync_missing_indexes)
+
+    res = _ev(_sync())
+
+    async def _dispose():
+        await eng.dispose()
+
+    _ev(_dispose())
+    con.close()
+
+    assert "uq_chat_room_tenant_default" in res["skipped"], res
+    # 某条建不上不影响其余：无关索引仍应补上
+    assert "ix_agent_is_builtin" in res["created"], res
+
+
 def test_migration_supports_downgrade(tmp_path):
     """最后一步可回滚（只回退 head 一步，避免全量 drop 太慢）。
 

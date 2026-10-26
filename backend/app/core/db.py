@@ -299,6 +299,63 @@ def _sync_missing_columns(sync_conn) -> None:
     _backfill_legacy_nulls_once(sync_conn, text, dialect)
 
 
+# MySQL 没有部分索引，谓词会被丢弃。凡是「唯一性依赖谓词」的索引，
+# 在 MySQL 上都会退化成无谓词的全表唯一约束，语义完全不同，必须跳过。
+# 目前只有「每租户一个默认大群」属于这一类：去掉谓词就变成「每租户只能有一个房间」。
+_MYSQL_UNSAFE_INDEXES = {"uq_chat_room_tenant_default"}
+
+
+def sync_missing_indexes(sync_conn) -> dict:
+    """为**已存在**的表补建 ORM 里声明的索引，返回 ``{"created": [...], "skipped": [...]}``。
+
+    ``create_all`` 只在建表时顺带建索引，对已存在的表一概不管；而 alembic 的
+    老库接管路径是「补表 + 补列 + stamp 到 head」——stamp 跳过了所有历史 revision，
+    于是**模型后来新增的索引永远不会落到老库上**。
+
+    后果已经在真实库里出现过：``chat_room`` 的两条唯一索引在 ``alembic_version``
+    已是 head 的库上根本不存在，P0-4 的并发修复因此完全失效（约束是最终判据，
+    缺了它就是「先查后建」裸奔）；``webhook_token`` 的路径唯一索引、
+    ``tenant`` 的邀请码唯一索引同理——它们挡的是重复数据，不是性能。
+
+    这里只处理 ``Index`` 对象（含部分索引）。表级 ``UniqueConstraint`` 在 SQLite
+    上只能靠重建表来加，属于 revision 的职责，不在本函数范围内。
+
+    ``skipped`` 收录建不出来的名字（存量数据重复、方言不支持等）。
+    唯一约束撞上存量重复数据时**不能**静默成功：调用方要把它记进日志，
+    让运维看到「这条约束仍然没建上，需要先清理数据」。
+    """
+    from sqlalchemy import inspect
+    from sqlalchemy.exc import IntegrityError
+
+    inspector = inspect(sync_conn)
+    dialect = sync_conn.dialect.name
+    existing_tables = set(inspector.get_table_names())
+    created: list[str] = []
+    skipped: list[str] = []
+
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            continue
+        have = {ix["name"] for ix in inspector.get_indexes(table.name)}
+        for idx in table.indexes:
+            name = idx.name or f"ix_{table.name}_?"
+            if name in have:
+                continue
+            if dialect == "mysql" and name in _MYSQL_UNSAFE_INDEXES:
+                skipped.append(name)
+                continue
+            try:
+                idx.create(sync_conn, checkfirst=True)
+                created.append(name)
+            except IntegrityError:
+                # 存量重复数据：约束建不上。数据清理属于人工决策（归档 vs 合并），
+                # 这里只报告，不替用户改业务数据。
+                skipped.append(name)
+            except Exception:  # noqa: BLE001
+                skipped.append(name)
+    return {"created": created, "skipped": skipped}
+
+
 def _backfill_nulls(sync_conn, col, text_mod, dialect: str = "sqlite") -> None:
     """把某列的非空 NULL 行回填为标量默认值（可空列不动，避免误改）。"""
     if col.nullable or col.default is None:

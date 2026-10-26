@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import AsyncSessionLocal, get_db
-from app.core.errors import NotFoundError, PermissionDeniedError, ValidationError
+from app.core.errors import ConflictError, NotFoundError, PermissionDeniedError, ValidationError
 from app.ingest.storage import get_storage
 from app.middleware.auth_dep import get_current_user, require_permission
 from app.models import (
@@ -923,10 +923,15 @@ async def transfer_owner(
     user: User = Depends(require_permission("chat:use")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """转让群主（仅现任群主或租户管理员）。默认大群不可转让。"""
+    """转让群主（仅现任群主或租户管理员）。默认大群与私聊不可转让。"""
     room = await _guard_room(db, user, room_id)
     if room.is_default:
         raise PermissionDeniedError("全员大群不支持转让群主")
+    # 私聊没有「群主」概念：owner_id 存的是用户对里较小的那个 id，也是唯一键
+    # uq_chat_room_direct_pair 的一部分。转让会改写业务键，这一对用户的私聊
+    # 从此查不到，再点开就新建一个——消息一分为二。
+    if room.kind == "direct":
+        raise PermissionDeniedError("私聊不支持转让群主")
     if room.owner_id != user.id and not user.is_admin:
         raise PermissionDeniedError("仅群主可转让群主")
     new_uid = int(body.get("user_id") or 0)

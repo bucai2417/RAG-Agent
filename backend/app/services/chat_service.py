@@ -1,7 +1,9 @@
 """对话服务：检索增强生成（RAG）+ 引用溯源。"""
 from __future__ import annotations
 
+import asyncio
 import time
+from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from sqlalchemy import select
@@ -57,21 +59,47 @@ PLAIN_SYSTEM_PROMPT = "你是一个乐于助人的智能助手。请用简体中
 
 # 会话级串行锁：同一会话的并发轮次必须串行，否则两条消息会各自读到相同历史、
 # message_count 读改写竞态、上下文互相看不到。锁按 conversation_id 惰性创建。
-_CONV_LOCKS: dict[int, "asyncio.Lock"] = {}
+#
+# 条目带引用计数：早先只有一个 ``release_conv_lock`` 却没有任何调用点，
+# 字典随会话数单调增长、永不回收，长期运行会慢慢吃内存（每个会话一个 Lock 对象）。
+# 现在释放时机由 ``conv_lock`` 自己掌握——最后一个持有者离开时删除条目，
+# 调用方不再需要（也不可能忘记）手工释放。
+_CONV_LOCKS: dict[int, list] = {}  # {conversation_id: [asyncio.Lock, holder_count]}
 
 
-def _conv_lock(conversation_id: int):
-    import asyncio
+@asynccontextmanager
+async def conv_lock(conversation_id: int):
+    """会话级串行锁（最后一个持有者离开时自动回收条目）。
 
-    lock = _CONV_LOCKS.get(conversation_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _CONV_LOCKS[conversation_id] = lock
-    return lock
+    为什么不能每次调用新建一个 Lock：两个并发请求会拿到不同的 Lock，等于没有锁。
+    所以条目必须在「排队之前」就存在，且所有等待者拿到的是同一个对象——
+    引用计数在 ``await lock.acquire()`` 之前 +1，退出后 -1。
+
+    计数归零 ⇒ 没有持有者、也没有等待者（等待者会在排队前先 +1），
+    此刻删除条目是安全的：从减计数到 pop 之间没有 await，不会被其它协程插进来。
+    因而「释放」不需要调用方记着去做——这正是旧实现泄漏的原因
+    （``release_conv_lock`` 从未被任何地方调用）。
+    """
+    entry = _CONV_LOCKS.get(conversation_id)
+    if entry is None:
+        entry = [asyncio.Lock(), 0]
+        _CONV_LOCKS[conversation_id] = entry
+    entry[1] += 1
+    lock = entry[0]
+    try:
+        async with lock:
+            yield
+    finally:
+        entry[1] -= 1
+        if entry[1] <= 0 and _CONV_LOCKS.get(conversation_id) is entry:
+            _CONV_LOCKS.pop(conversation_id, None)
 
 
 def release_conv_lock(conversation_id: int) -> None:
-    """会话结束时释放其锁（避免 _CONV_LOCKS 无限增长）。"""
+    """强制丢弃某会话的锁条目（仅供测试/会话删除后清理）。
+
+    正常路径不需要调用：``conv_lock`` 在最后一个持有者退出时自动回收。
+    """
     _CONV_LOCKS.pop(conversation_id, None)
 
 
@@ -330,7 +358,7 @@ async def stream_answer(
     传 []=不装技能。技能工具与「提示词」会一并进入 ReAct 链路（与智能体一致）。
     """
     # 会话级串行：同一会话的并发轮次排队执行，避免历史/计数竞态与上下文串扰。
-    async with _conv_lock(conversation.id):
+    async with conv_lock(conversation.id):
         async for evt in _stream_answer_locked(
             db, ps=ps, conversation=conversation, query=query, top_k=top_k,
             model_config_id=model_config_id, temperature=temperature, images=images,
@@ -706,7 +734,7 @@ async def resume_answer(
     """
     # 与 stream_answer 共用会话锁：续跑同样改会话历史，须串行。
     lock_id = action.conversation_id or 0
-    async with _conv_lock(lock_id):
+    async with conv_lock(lock_id):
         async for evt in _resume_answer_locked(
             db, ps=ps, action=action, tool=tool,
             tool_result_text=tool_result_text, allow_auto_write=allow_auto_write,

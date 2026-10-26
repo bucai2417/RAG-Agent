@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -41,6 +42,29 @@ class ChatRoom(Base, IdMixin, TimestampMixin, TenantMixin):
 
     __table_args__ = (
         Index("ix_chat_room_direct", "tenant_id", "peer_user_id"),
+        # 「先查后建」在没有唯一约束时挡不住并发：两个用户同时点开私聊会各建一个房间，
+        # 消息从此分裂在两个房间里。业务键（租户 + 归一化后的用户对）上必须有唯一约束，
+        # 否则查询与插入之间的窗口永远存在。
+        # 带上 kind/status 是为了让「群聊」和「已解散的旧房间」不占键：
+        #   部分唯一索引的谓词不参与唯一性比较，只能靠列本身区分。
+        Index(
+            "uq_chat_room_direct_pair",
+            "tenant_id", "owner_id", "peer_user_id", "kind", "status",
+            unique=True,
+            sqlite_where=text("kind = 'direct' AND status = 'active'"),
+            postgresql_where=text("kind = 'direct' AND status = 'active'"),
+        ),
+        # 每个租户只能有一个「活跃的」默认大群：否则 ensure_default_room 的
+        # 「查不到就建」在多人首次登录时会建出多个 is_default 房间。
+        # 谓词必须带上 status：ensure_default_room 只认 active，若约束只看 is_default，
+        # 已归档的旧默认大群仍占着键，重复行既归档不掉、也建不出新房间。
+        Index(
+            "uq_chat_room_tenant_default",
+            "tenant_id",
+            unique=True,
+            sqlite_where=text("is_default = 1 AND status = 'active'"),
+            postgresql_where=text("is_default AND status = 'active'"),
+        ),
     )
 
 

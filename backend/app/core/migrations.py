@@ -166,22 +166,41 @@ async def current_revision(engine) -> str | None:
 
 
 async def _adopt_legacy_schema(engine, url: str) -> None:
-    """老库（有表、无 alembic_version）接管：建缺表 → 补缺列 → stamp 到 head。
+    """老库（有表、无 alembic_version）接管：建缺表 → 补缺列 → 补缺索引 → stamp 到 head。
 
     create_all 在这里只负责「补齐整张缺失的表」，之后的 schema 变更全部由
     revision 承担，因此不会再出现「升级靠补列」的状态。
+
+    但 stamp 会跳过全部历史 revision，所以**表结构里除「列」以外的部分**
+    （索引、唯一键）不会被任何 revision 补上——这正是 ``sync_missing_indexes``
+    存在的理由。真实库里已经出现过：``alembic_version`` 已是 head，而
+    ``chat_room`` 的两条唯一索引根本不存在，靠约束兜底的并发修复全部失效。
     """
-    from app.core.db import Base, _sync_missing_columns
+    from app.core.db import Base, _sync_missing_columns, sync_missing_indexes
 
     import app.models  # noqa: F401
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_sync_missing_columns)
+        ix = await conn.run_sync(sync_missing_indexes)
 
     head = await asyncio.to_thread(_head_revision, url)
     await asyncio.to_thread(_run_alembic_sync, url, stamp_revision=head)
-    logger.info("legacy_schema_adopted", revision=head)
+    logger.info(
+        "legacy_schema_adopted",
+        revision=head,
+        indexes_created=len(ix["created"]),
+        indexes_skipped=len(ix["skipped"]),
+    )
+    if ix["skipped"]:
+        # 建不上的多半是唯一索引撞了存量重复数据：必须让运维看见，否则
+        # 应用层会误以为「有约束兜底」而实际在并发下裸奔。
+        logger.warning(
+            "legacy_indexes_not_created",
+            indexes=sorted(ix["skipped"]),
+            hint="存量数据重复或方言不支持；清理重复行后重启即可补建",
+        )
 
 
 def _head_revision(url: str) -> str:
