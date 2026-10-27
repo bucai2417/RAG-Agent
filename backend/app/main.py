@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -129,6 +130,14 @@ async def lifespan(app: FastAPI):
 
     if settings.task_backend == "memory":
         await start_workers(2)
+
+    # 上次「卸载本地向量模型依赖」剩下的 runtime.trash-*：进程重启后句柄已释放，清掉
+    try:
+        from app.providers import local_embed
+
+        local_embed.reap_runtime_if_pending()
+    except Exception:  # noqa: BLE001
+        logger.exception("runtime_trash_reap_failed")
 
     # HITL 恢复：把「审批通过但未执行完」的卡死动作标记失败（进程重启兜底）
     try:
@@ -289,6 +298,9 @@ app = FastAPI(
 )
 
 app.add_middleware(RequestContextMiddleware)
+# 前端产物是 1.3MB 的主 JS + 367KB CSS，未压缩时首次登录要串行下载 ~3.5MB。
+# gzip 后约 1/3；这是「打开登录页要加载半天」的直接原因之一。
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -368,14 +380,39 @@ async def health() -> dict:
 
 # ---- 前端静态托管（统一入口：浏览器只访问本端口）----
 # 单一前端：/assets 挂产物资源；/ 与未匹配路由一律返回 index.html。
+
+
+class _HashedAssetFiles(StaticFiles):
+    """给带内容哈希的产物打长缓存。
+
+    vite 产物文件名里带哈希（index-CfIeZzT-.js），内容一变文件名就变，
+    所以可以放心 immutable 缓存一年。之前没有任何 Cache-Control，浏览器每次
+    进站都要重新下载 1.3MB 主包 + 367KB CSS —— 这是「加载半天」的另一个来源。
+    """
+
+    async def get_response(self, path: str, scope):  # noqa: ANN001
+        resp = await super().get_response(path, scope)
+        if resp.status_code == 200:
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return resp
+
+
 if (WEB_DIST / "index.html").is_file():
     assets_dir = WEB_DIST / "assets"
     if assets_dir.exists():
-        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+        app.mount(
+            "/assets",
+            _HashedAssetFiles(directory=str(assets_dir)),
+            name="assets",
+        )
 
     @app.get("/", include_in_schema=False)
     async def index():
-        return FileResponse(str(WEB_DIST / "index.html"))
+        # index.html 引用带哈希的产物，必须每次校验，否则升级后仍指向旧包
+        return FileResponse(
+            str(WEB_DIST / "index.html"),
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str):
@@ -387,6 +424,9 @@ if (WEB_DIST / "index.html").is_file():
         candidate = WEB_DIST / full_path
         if candidate.is_file():
             return FileResponse(str(candidate))
-        return FileResponse(str(WEB_DIST / "index.html"))
+        return FileResponse(
+            str(WEB_DIST / "index.html"),
+            headers={"Cache-Control": "no-cache"},
+        )
 else:
     logger.warning("web_dist_missing", path=str(WEB_DIST), hint="前端未构建，仅提供 API。运行 cd web && npm run build")

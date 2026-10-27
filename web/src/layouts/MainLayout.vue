@@ -130,7 +130,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowRight, ArrowDown, Reading } from '@element-plus/icons-vue'
 import { NAV, type NavGroup, type NavItem } from '@/config/nav'
@@ -160,7 +160,16 @@ const deploymentLabel = computed(
   () => ({ desktop: '桌面版', docker: 'Docker', source: '源码运行' })[deployment.value] || '',
 )
 
-onMounted(async () => {
+onMounted(() => {
+  // 版本号/更新检查都是「锦上添花」的信息，不该挡首屏渲染。
+  // 之前这里 await 串行调两个接口，其中一个（更新检查）要打 GitHub，
+  // 网络慢时整页像是卡住。现在全部推迟到首屏渲染之后再各自独立发起。
+  void loadVersionInfo()
+})
+
+let updateTimer: number | null = null
+
+async function loadVersionInfo() {
   if (!auth.user) await auth.fetchMe()
   // 版本/更新接口需 system:manage 权限，非管理员不发请求（否则每次加载都刷 401）
   if (!auth.hasPermission('system:manage')) return
@@ -171,11 +180,22 @@ onMounted(async () => {
   } catch {
     /* 接口不可用：不显示版本 */
   }
-  try {
-    const r = await updateApi.check()
-    hasUpdate.value = !!r.update_available
-  } catch {
-    /* 后台静默检查失败，不打扰用户 */
+  // 更新检查会访问 GitHub（可能 1~2s，网络差时更久），再往后推一拍，
+  // 避免与页面首屏数据请求抢带宽/连接。
+  updateTimer = window.setTimeout(() => {
+    updateApi
+      .check()
+      .then((r) => (hasUpdate.value = !!r.update_available))
+      .catch(() => {
+        /* 后台静默检查失败，不打扰用户 */
+      })
+  }, 3000)
+}
+
+onBeforeUnmount(() => {
+  if (updateTimer !== null) {
+    window.clearTimeout(updateTimer)
+    updateTimer = null
   }
 })
 

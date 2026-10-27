@@ -248,3 +248,55 @@ def test_strip_deploy_guide_multiline_and_case_insensitive():
     out = U._strip_deploy_guide(body)
     assert "更新A" in out and "更新B" in out
     assert "部署说明" not in out
+
+
+# ---------- 并发合并（single-flight）----------
+
+def test_check_update_concurrent_requests_share_one_network_call(monkeypatch):
+    """并发请求只打一次 GitHub：前端多标签页/多用户同时刷新时不得放大配额消耗。"""
+    import app.services.skill_search_service as S
+
+    called = {"n": 0}
+
+    async def _slow_gh(path, *, params=None, token=None, timeout=20):
+        called["n"] += 1
+        await asyncio.sleep(0.05)  # 模拟网络往返
+        return 200, {"tag_name": "v1.0.0", "assets": []}, {}
+
+    monkeypatch.setattr(S, "_gh_get", _slow_gh)
+    U.clear_cache()
+    U._inflight = None
+
+    async def _run():
+        return await asyncio.gather(*[U.check_update(force=True) for _ in range(5)])
+
+    results = asyncio.new_event_loop().run_until_complete(_run())
+    assert all(r["ok"] is True for r in results)
+    assert called["n"] == 1, f"应合并成 1 次网络请求，实际 {called['n']} 次"
+    U.clear_cache()
+    U._inflight = None
+
+
+def test_check_update_inflight_failure_does_not_poison_next_call(monkeypatch):
+    """在途请求失败后，后续请求必须能重新发起，而不是永久拿到失败结果。"""
+    import app.services.skill_search_service as S
+
+    state = {"n": 0}
+
+    async def _flaky(path, *, params=None, token=None, timeout=20):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise OSError("network down")
+        return 200, {"tag_name": "v1.0.0", "assets": []}, {}
+
+    monkeypatch.setattr(S, "_gh_get", _flaky)
+    U.clear_cache()
+    U._inflight = None
+    loop = asyncio.new_event_loop()
+
+    first = loop.run_until_complete(U.check_update(force=True))
+    assert first["ok"] is False
+    second = loop.run_until_complete(U.check_update(force=True))
+    assert second["ok"] is True and second["latest"] == "1.0.0"
+    U.clear_cache()
+    U._inflight = None

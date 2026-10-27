@@ -30,19 +30,28 @@ def test_is_safe_version_rejects_traversal_and_junk():
 
 
 # ---------- 下载 URL 校验 ----------
+# 纯字符串部分（协议/白名单）同步可判；DNS/SSRF 那半必须异步调用，
+# 否则同步 socket.getaddrinfo 会阻塞事件循环。
 
 def test_check_download_url_rejects_non_https():
-    assert U._check_download_url("http://github.com/x.zip") is not None
-    assert U._check_download_url("ftp://github.com/x.zip") is not None
+    assert U._check_download_url_scheme("http://github.com/x.zip") is not None
+    assert U._check_download_url_scheme("ftp://github.com/x.zip") is not None
 
 
 def test_check_download_url_rejects_foreign_host():
-    assert U._check_download_url("https://evil.example.com/x.zip") is not None
+    assert U._check_download_url_scheme("https://evil.example.com/x.zip") is not None
 
 
 def test_check_download_url_accepts_github():
-    assert U._check_download_url("https://github.com/241793/RAG-Agent/releases/download/v1.0.0/x.zip") is None
-    assert U._check_download_url("https://objects.githubusercontent.com/x.zip") is None
+    assert asyncio.run(
+        U._check_download_url("https://github.com/241793/RAG-Agent/releases/download/v1.0.0/x.zip")
+    ) is None
+    assert asyncio.run(U._check_download_url("https://objects.githubusercontent.com/x.zip")) is None
+
+
+def test_check_download_url_async_rejects_non_https():
+    assert asyncio.run(U._check_download_url("http://github.com/x.zip")) is not None
+    assert asyncio.run(U._check_download_url("ftp://github.com/x.zip")) is not None
 
 
 # ---------- 下载 + 校验 ----------

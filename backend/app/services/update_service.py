@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 
@@ -29,6 +30,14 @@ GITHUB_API = "https://api.github.com"
 # 缓存 TTL（秒）：避免每次打开页面都打 GitHub（未认证仅 60 次/小时）
 _CACHE_TTL = 15 * 60
 _cache: dict[str, object] = {"ts": 0.0, "data": None}
+
+# 并发的 check_update 合并成一个在途请求。
+#
+# 为什么需要：前端 MainLayout 每次挂载都调一次，多标签页/多用户同时刷新时会有
+# N 个请求同时穿过缓存（冷启动缓存必空），各自打一次 GitHub。实测 5 并发
+# force=true 的尾延迟从 0.34s 涨到 1.4s，未认证配额（60 次/小时）也浪费得很快。
+# 用一个 asyncio.Task 做 single-flight：第一个请求负责取，其余等它的结果。
+_inflight: asyncio.Task | None = None
 
 # 预发布标记：默认不计为「有更新」，避免把 rc/beta 推给普通用户
 _PRERELEASE_RE = re.compile(r"-")
@@ -153,12 +162,52 @@ def _pick_asset(assets: list[dict], deployment: str = "desktop") -> dict | None:
 
 
 async def check_update(*, force: bool = False) -> dict:
-    """检查是否有新版本。永不抛异常，失败时返回 {"ok": False, "error": ...}。"""
+    """检查是否有新版本。永不抛异常，失败时返回 {"ok": False, "error": ...}。
+
+    并发安全：同进程内的并发调用合并成一次 GitHub 请求（single-flight），
+    避免多标签页/多用户同时刷新时把未认证配额（60 次/小时）打光。
+    """
+    global _inflight
+
+    # 1) 缓存命中直接返回（非强制刷新）
+    if not force:
+        cached = _cache.get("data")
+        if (
+            cached is not None
+            and _cache.get("repo") == _repo_name()
+            and (time.time() - float(_cache.get("ts") or 0)) < _CACHE_TTL
+        ):
+            return {**cached, "cached": True}  # type: ignore[arg-type]
+
+    # 2) 已有在途请求：等它，不重复打 GitHub
+    if _inflight is not None and not _inflight.done():
+        try:
+            result = await asyncio.shield(_inflight)
+            return {**result, "cached": True}
+        except Exception:  # noqa: BLE001
+            pass  # 在途请求异常：落到下面自己取一次
+
+    # 3) 由本次请求负责取
+    task = asyncio.create_task(_check_update_uncached())
+    _inflight = task
+    try:
+        return await task
+    finally:
+        if _inflight is task:
+            _inflight = None
+
+
+def _repo_name() -> str:
+    return (getattr(settings, "update_repo", "") or "241793/RAG-Agent").strip()
+
+
+async def _check_update_uncached() -> dict:
+    """真正做 GitHub 查询的分支（不带缓存判断）。"""
     from app.services.skill_search_service import _gh_get, _rate_limited
 
     current = settings.app_version
     deployment = detect_deployment()
-    repo = (getattr(settings, "update_repo", "") or "241793/RAG-Agent").strip()
+    repo = _repo_name()
     image = f"ghcr.io/{repo.lower()}"
 
     base = {
@@ -168,18 +217,6 @@ async def check_update(*, force: bool = False) -> dict:
         "repo": repo,
         "releases_url": f"https://github.com/{repo}/releases",
     }
-
-    # 缓存命中（非强制刷新）
-    now = time.time()
-    cached = _cache.get("data")
-    cached_repo = _cache.get("repo")
-    if (
-        not force
-        and cached is not None
-        and cached_repo == repo
-        and (now - float(_cache.get("ts") or 0)) < _CACHE_TTL
-    ):
-        return {**cached, "cached": True}  # type: ignore[arg-type]
 
     if not getattr(settings, "update_check_enabled", True):
         return {**base, "update_available": False, "latest": current,
@@ -237,7 +274,7 @@ async def check_update(*, force: bool = False) -> dict:
         "hint": _hint_for(deployment, latest_ver, image),
     }
 
-    _cache.update({"ts": now, "data": result, "repo": repo})
+    _cache.update({"ts": time.time(), "data": result, "repo": repo})
     return {**result, "cached": False}
 
 
@@ -295,11 +332,9 @@ def _set_progress(**kw) -> None:
     _progress.update(kw)
 
 
-def _check_download_url(url: str) -> str | None:
-    """下载前的 URL 校验：仅 https + 白名单主机 + 过 SSRF 守卫。"""
+def _check_download_url_scheme(url: str) -> str | None:
+    """下载 URL 的纯字符串校验部分（不碰网络，可在事件循环里直接调）。"""
     from urllib.parse import urlparse
-
-    from app.agents.tools.builtin import _check_url
 
     p = urlparse(url)
     if p.scheme != "https":
@@ -307,10 +342,20 @@ def _check_download_url(url: str) -> str | None:
     host = (p.hostname or "").lower()
     if host not in _ALLOWED_DL_HOSTS:
         return f"更新包主机不在白名单内：{host}"
-    err = _check_url(url, None)
+    return None
+
+
+async def _check_download_url(url: str) -> str | None:
+    """下载前的 URL 校验：仅 https + 白名单主机 + 过 SSRF 守卫。
+
+    异步版：DNS 解析走线程池，避免下载前的校验拖住事件循环。
+    """
+    from app.agents.tools.builtin import _check_url_async
+
+    err = _check_download_url_scheme(url)
     if err:
         return err
-    return None
+    return await _check_url_async(url, None)
 
 
 async def download_update(*, url: str, digest: str | None, version: str) -> dict:
@@ -322,7 +367,7 @@ async def download_update(*, url: str, digest: str | None, version: str) -> dict
 
     import httpx
 
-    err = _check_download_url(url)
+    err = await _check_download_url(url)
     if err:
         _set_progress(phase="failed", error=err)
         return {"ok": False, "error": err}
@@ -349,7 +394,7 @@ async def download_update(*, url: str, digest: str | None, version: str) -> dict
                 # 重定向后的**最终 URL 也必须校验** —— 否则恶意 Release 可先指向
                 # 白名单主机、再 302 到任意地址，绕过上面的初始校验。
                 final = str(resp.url)
-                err2 = _check_download_url(final)
+                err2 = await _check_download_url(final)
                 if err2:
                     msg = f"下载被重定向到非白名单地址，已中止：{err2}"
                     logger.error("update_redirect_blocked", final=final[:200])

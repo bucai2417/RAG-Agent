@@ -123,13 +123,16 @@ def build_queries(terms: list[str]) -> list[str]:
 
 
 async def _gh_get(path: str, *, params: dict | None = None, token: str | None = None, timeout: int = 20):
-    """带 SSRF 校验 + 可选鉴权的 GitHub GET。返回 (status_code, json|None, headers)。"""
+    """带 SSRF 校验 + 可选鉴权的 GitHub GET。返回 (status_code, json|None, headers)。
+
+    SSRF 校验走 `_check_url_async`：同步版里的 `socket.getaddrinfo` 会阻塞事件循环。
+    """
     import httpx
 
-    from app.agents.tools.builtin import _check_url
+    from app.agents.tools.builtin import _check_url_async
 
     url = f"{GITHUB_API}{path}"
-    err = _check_url(url, None)  # 只校验协议与内网（github.com 为公网，通过）
+    err = await _check_url_async(url, None)  # 只校验协议与内网（github.com 为公网，通过）
     if err:
         raise ValueError(err)
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "rag-platform"}

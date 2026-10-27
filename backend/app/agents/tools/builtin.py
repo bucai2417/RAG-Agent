@@ -92,7 +92,12 @@ def _is_blocked_ip(ip: str) -> bool:
 
 
 def _check_url(url: str, allow_hosts: list[str] | None) -> str | None:
-    """返回错误信息，或 None 表示通过。"""
+    """返回错误信息，或 None 表示通过。**同步阻塞**（含 DNS 解析）。
+
+    只想在 async 代码里调用时请用 `_check_url_async`：这里的
+    `socket.getaddrinfo` 在网络抖动/DNS 不通时要等 5~30 秒，直接在事件循环里
+    调用会把整个进程钉住（表现为「其它接口全部无响应」）。
+    """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         return f"不支持的协议: {parsed.scheme}"
@@ -111,6 +116,24 @@ def _check_url(url: str, allow_hosts: list[str] | None) -> str | None:
         if _is_blocked_ip(ip):
             return f"拒绝访问内网/保留地址: {host} -> {ip}"
     return None
+
+
+async def _check_url_async(
+    url: str, allow_hosts: list[str] | None, *, timeout: float = 10.0
+) -> str | None:
+    """`_check_url` 的异步封装：DNS 解析丢到线程池，不阻塞事件循环。
+
+    不缓存结果是有意的：SSRF 守卫的价值就在「请求前现查一次」，缓存等于把
+    DNS rebinding 的窗口重新打开。
+    """
+    import asyncio
+
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_check_url, url, allow_hosts), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        return f"域名解析超时（>{timeout:.0f}s）"
 
 
 class HttpRequestTool:

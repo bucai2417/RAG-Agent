@@ -90,6 +90,12 @@ def _file_size(p: Path) -> int:
 
 
 def _dir_size(p: Path) -> int:
+    """递归统计目录体积（同步、阻塞，只允许在 worker 线程里调用）。
+
+    data/ 里有模型缓存与浏览器 profile 共 2.6 万个文件/1.2GB，Windows 上一次要走
+    6~7 秒。在事件循环里直接调用会把整个进程钉住：期间 /health、登录后的所有
+    XHR 全部无响应，用户看到的就是「登录后整站卡死半小时」。
+    """
     total = 0
     try:
         for root, _dirs, files in os.walk(p):
@@ -101,6 +107,40 @@ def _dir_size(p: Path) -> int:
     except OSError:
         pass
     return total
+
+
+# 体积结果缓存：目录本身不会每秒变化，而 SystemOps 页会反复拉 /system/info。
+_SIZE_CACHE: dict[str, tuple[int, float]] = {}
+_SIZE_TTL = 60.0
+
+
+def _cached_dir_size(p: Path | None) -> int:
+    if p is None:
+        return 0
+    key = str(p)
+    now = time.time()
+    hit = _SIZE_CACHE.get(key)
+    if hit is not None and now - hit[1] < _SIZE_TTL:
+        return hit[0]
+    size = _dir_size(p)
+    _SIZE_CACHE[key] = (size, now)
+    return size
+
+
+def _collect_sizes(storage_dir: Path | None) -> tuple[int, int]:
+    """一次性收集 data/ 与存储目录体积（供 asyncio.to_thread 调用）。"""
+    return _cached_dir_size(DATA_DIR), _cached_dir_size(storage_dir)
+
+
+# platform.platform() 在 Windows 上要 0.3s+（起 WMI 查询），值不会变，进程内缓存一次。
+_PLATFORM_CACHE: dict[str, str] = {}
+
+
+def _platform_info() -> tuple[str, str]:
+    if not _PLATFORM_CACHE:
+        _PLATFORM_CACHE["python"] = platform.python_version()
+        _PLATFORM_CACHE["platform"] = platform.platform()
+    return _PLATFORM_CACHE["python"], _PLATFORM_CACHE["platform"]
 
 
 class DbUrlIn(BaseModel):
@@ -142,6 +182,14 @@ async def system_info(
     except Exception:  # noqa: BLE001
         pass
 
+    # 体积统计是纯磁盘扫描，必须丢线程池：data/ 有 2.6 万个文件，同步跑会阻塞
+    # 整个事件循环 6~7 秒（本端点又是登录后 MainLayout 必调的一次）。
+    import asyncio
+
+    storage_dir = Path(settings.storage_local_dir) if settings.storage_local_dir else None
+    data_size, files_size = await asyncio.to_thread(_collect_sizes, storage_dir)
+    python_ver, platform_str = await asyncio.to_thread(_platform_info)
+
     return {
         "db_kind": kind,
         "version": settings.app_version,
@@ -154,12 +202,12 @@ async def system_info(
         "vector_backend": settings.resolved_vector_backend,
         "task_backend": settings.task_backend,
         "data_dir": str(DATA_DIR),
-        "data_dir_size": _dir_size(DATA_DIR),
-        "files_dir_size": _dir_size(Path(settings.storage_local_dir)),
+        "data_dir_size": data_size,
+        "files_dir_size": files_size,
         "uptime_seconds": int(time.time() - _START_TS),
         "table_count": tables,
-        "python": platform.python_version(),
-        "platform": platform.platform(),
+        "python": python_ver,
+        "platform": platform_str,
         "frozen": bool(getattr(sys, "frozen", False)),
     }
 
