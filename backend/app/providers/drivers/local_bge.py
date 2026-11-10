@@ -1,8 +1,11 @@
-"""本地 bge 系列驱动占位（FlagEmbedding / TEI）。
+"""本地 bge 系列驱动（FlagEmbedding）——**已弃用，新部署请用 local_st**。
 
-启用方式：pip install FlagEmbedding，然后在此实现 embed/rerank 调用本地模型
-（bge-m3 做 embedding，bge-reranker-v2-m3 做重排）。当前留接口，保证 Provider
-抽象层完整，切换时无需改动上层。
+保留原因：兼容既有 kind="local_bge" 配置。FlagEmbedding 依赖重、无法按需安装，
+新部署请选 `local_st`（sentence-transformers，模型可在「模型管理 → 本地离线向量模型」
+里下载、导入、删除）。
+
+原说明：启用方式：pip install FlagEmbedding，然后在此实现 embed/rerank 调用本地模型
+（bge-m3 做 embedding，bge-reranker-v2-m3 做重排）。
 """
 from __future__ import annotations
 

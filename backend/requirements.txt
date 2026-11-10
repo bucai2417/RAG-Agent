@@ -42,4 +42,8 @@ pycryptodome>=3.20      # 企业微信回调 AES 解密（lark-oapi 亦依赖）
 # MySQL:       pip install asyncmy
 # Redis:       pip install redis
 # Anthropi:    pip install anthropi
-# 本地模型:     pip install FlagEmbedding
+# 本地离线向量模型（sentence-transformers；模型可在「模型管理 → 本地离线向量模型」下载/导入）
+#              pip install sentence-transformers torch
+#              桌面版可装到数据目录由程序自动加载（需 CPython 3.10 x64）：
+#              python -m pip install --no-deps --target "<数据目录>/data/models/runtime" sentence-transformers transformers tokenizers safetensors
+# 旧本地模型（已弃用，仅兼容既有配置）：pip install FlagEmbedding

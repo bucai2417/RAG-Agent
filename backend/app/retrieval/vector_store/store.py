@@ -126,6 +126,14 @@ class NumpyStore(VectorStore):
 
         # 一次性堆叠 + 批量归一化 + 一次矩阵乘（替代逐行 Python 点积）
         mat = np.vstack([np.asarray(r[7], dtype=np.float32) for r in kept])
+        # 维度护栏：VectorType 不记录维度，换过向量模型后库内可能混着两种维度。
+        # 不显式报错的话，numpy 抛的是一句 "matmul: dimension mismatch"，而调用方
+        # （retrieval_service._one）会把它吞成 vector_unavailable，用户只看到"检索质量下降"。
+        if len(query_vec) != int(mat.shape[1]):
+            raise ValueError(
+                f"向量维度不一致：库内 {int(mat.shape[1])} 维，查询向量 {len(query_vec)} 维。"
+                "该知识库换过向量模型，请在知识库详情里对该模型「重新处理」文档后再检索。"
+            )
         norms = np.linalg.norm(mat, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         mat /= norms

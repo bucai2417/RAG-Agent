@@ -41,6 +41,9 @@ postgres = ["asyncpg>=0.29", "pgvector>=0.2.5"]
 mysql = ["asyncmy>=0.2.9"]
 redis = ["redis>=5.0"]
 anthropi = ["anthropi>=0.30"]
+# 本地离线向量模型（推荐）：sentence-transformers + torch
+local-st = ["sentence-transformers>=3.0"]
+# 旧本地模型，已弃用，仅兼容既有部署
 local = ["FlagEmbedding>=1.2"]
 
 [tool.setuptools]

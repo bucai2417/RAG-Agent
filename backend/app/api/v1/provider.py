@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
-from app.core.errors import NotFoundError
+from app.core.errors import NotFoundError, ValidationError
 from app.middleware.auth_dep import get_current_user, require_admin, require_permission
 from app.services.audit_service import audited
 from app.models import ModelConfig, ModelProvider, User
@@ -55,6 +55,211 @@ async def list_providers(
         )
     ).scalars().all()
     return [_to_out(p) for p in rows]
+
+
+# ---- 本地离线向量模型 ----
+# 路由顺序要求：这些 /local/* 必须定义在 /{provider_id} 系列之前，否则 "local" 会被
+# 当成 provider_id 走进 int 解析而报 422。
+#
+# 线程化要求：这里每个端点都会碰文件系统（扫描模型目录、统计 runtime 体积、
+# 解压 zip、删除目录）。**必须 `asyncio.to_thread`**——这些函数挂的目录里有
+# 2~3 万个文件，同步跑会把整个事件循环钉住：实测进一次模型管理页，
+# `/local/status` 要 11.8s，期间其它请求（含 /health）全部无响应，
+# 用户看到的就是「登录后整站卡死」。判据是「这个调用会不会等磁盘」，会就丢线程池。
+
+
+@router.get("/local/status")
+async def local_embedding_status(
+    user: User = Depends(require_permission("model:read")),
+) -> dict:
+    """本地向量模型的依赖状态、缓存目录与模型清单（不联网）。"""
+    import asyncio
+
+    return await asyncio.to_thread(_collect_local_status)
+
+
+def _collect_local_status() -> dict:
+    """在 worker 线程里拼装本地模型面板数据（同步函数，勿在事件循环里直接调用）。"""
+    from app.providers import local_embed
+
+    dep = local_embed.dependency_status()
+    cached = {m["id"]: m for m in local_embed.scan_local_models()}
+    models: list[dict] = []
+    seen: set[str] = set()
+    for m in local_embed.RECOMMENDED_MODELS:
+        item = dict(m)
+        local = cached.get(m["id"])
+        item["cached"] = bool(local)
+        item["path"] = local["path"] if local else None
+        item["source"] = local["source"] if local else None
+        item["progress"] = local_embed.progress(m["id"])
+        models.append(item)
+        seen.add(m["id"])
+    # 用户自己导入/手拷的模型（不在推荐列表里）也要能看到，否则导入了却无处使用
+    for mid, local in cached.items():
+        if mid in seen:
+            continue
+        models.append(
+            {
+                "id": mid,
+                "label": local.get("label") or mid,
+                "dim": local.get("dim") or 0,
+                "size": "",
+                "note": "本地导入",
+                "cached": True,
+                "path": local["path"],
+                "source": local["source"],
+                "progress": local_embed.progress(mid),
+            }
+        )
+    return {
+        "installed": dep["installed"],
+        "torch": dep["torch"],
+        "version": dep["version"],
+        "error": dep["error"],
+        "cache_dir": str(local_embed.cache_dir()),
+        "runtime_dir": str(local_embed.runtime_dir()),
+        "models": models,
+        "install_hint": local_embed.install_hint(),
+        "mirror": local_embed.hf_endpoint(),
+        "dependency": local_embed.runtime_status(),
+    }
+
+
+@router.get("/local/progress")
+async def local_embedding_progress(
+    model_id: str,
+    user: User = Depends(require_permission("model:read")),
+) -> dict:
+    """轮询下载进度。纯内存读，不需要线程化。"""
+    from app.providers import local_embed
+
+    return {"model_id": model_id, **local_embed.progress(model_id)}
+
+
+# ---- 本地推理依赖（torch + sentence-transformers）一键安装 / 卸载 ----
+
+
+@router.get("/local/dependency")
+async def local_dependency_status(
+    user: User = Depends(require_permission("model:read")),
+) -> dict:
+    """runtime 可选依赖的状态：是否已装、占多少空间、能否自动安装、安装进度。"""
+    import asyncio
+
+    from app.providers import local_embed
+
+    return await asyncio.to_thread(local_embed.runtime_status)
+
+
+@router.get("/local/dependency/progress")
+async def local_dependency_progress(
+    user: User = Depends(require_permission("model:read")),
+) -> dict:
+    """轮询依赖安装进度（含 pip 日志尾部）。纯内存读，不需要线程化。"""
+    from app.providers import local_embed
+
+    return local_embed.dependency_progress()
+
+
+@router.post("/local/dependency/install")
+@audited("provider.local_dep_install", "model_provider")
+async def local_dependency_install(
+    user: User = Depends(require_admin),
+) -> dict:
+    """后台安装依赖到 <数据目录>/data/models/runtime，立刻返回，前端轮询进度。"""
+    import asyncio
+
+    from app.providers import local_embed
+
+    # 冻结态要先探测解释器（起子进程），别在事件循环里等
+    return await asyncio.to_thread(local_embed.start_dependency_install)
+
+
+@router.delete("/local/dependency")
+@audited("provider.local_dep_uninstall", "model_provider")
+async def local_dependency_uninstall(
+    user: User = Depends(require_admin),
+) -> dict:
+    """卸载依赖目录并释放已加载的模型实例（被占用的文件下次启动清理）。"""
+    import asyncio
+
+    from app.providers import local_embed
+
+    # 800MB / 2.7 万文件的目录改名/删除，同步跑会明显卡住事件循环
+    return await asyncio.to_thread(local_embed.uninstall_dependencies)
+
+
+@router.post("/local/download")
+@audited("provider.local_download", "model_provider")
+async def download_local_model(
+    body: dict,
+    user: User = Depends(require_admin),
+) -> dict:
+    """启动后台下载指定模型。立刻返回，前端轮询 /local/progress。"""
+    import asyncio
+
+    from app.providers import local_embed
+
+    model_id = str((body or {}).get("model_id", "")).strip()
+    source = str((body or {}).get("source") or "hf")
+    if not model_id:
+        raise ValidationError("请指定 model_id")
+    # start_download 内部会扫缓存目录判断「是否已下载」
+    return await asyncio.to_thread(local_embed.start_download, model_id, source=source)
+
+
+@router.post("/local/import")
+@audited("provider.local_import", "model_provider")
+async def import_local_model(
+    file: UploadFile = File(...),
+    name: str | None = None,
+    user: User = Depends(require_admin),
+) -> dict:
+    """上传模型 zip 导入（完全离线场景用）。zip 内含 config.json + 权重文件。"""
+    import asyncio
+    import tempfile
+    from pathlib import Path as _Path
+
+    from app.providers import local_embed
+
+    if file.filename and not file.filename.lower().endswith(".zip"):
+        raise ValidationError("请上传 zip 格式的模型包")
+    tmp_dir = _Path(tempfile.mkdtemp(prefix="rag-model-upload-"))
+    tmp_zip = tmp_dir / "model.zip"
+    try:
+        total = 0
+        with open(tmp_zip, "wb") as f:
+            while True:
+                chunk = await file.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > 2 * 1024 * 1024 * 1024:
+                    raise ValidationError("模型包超过 2GB 上限")
+                f.write(chunk)
+        if total == 0:
+            raise ValidationError("上传的模型包为空")
+        # 解压 400MB+ 权重必须离开事件循环，否则上传期间整站请求一起挂住
+        return await asyncio.to_thread(local_embed.install_from_zip, tmp_zip, name=name)
+    finally:
+        import shutil as _shutil
+
+        _shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+@router.delete("/local/models/{model_id:path}")
+@audited("provider.local_delete", "model_provider")
+async def delete_local_model(
+    model_id: str,
+    user: User = Depends(require_admin),
+) -> dict:
+    """删除已下载/导入的本地模型。"""
+    import asyncio
+
+    from app.providers import local_embed
+
+    return await asyncio.to_thread(local_embed.delete_model, model_id)
 
 
 @router.post("", response_model=ProviderOut)

@@ -54,7 +54,14 @@ def _build_driver(
 
         drv = OllamaDriver(base_url=base_url, api_key=api_key, timeout=timeout,
                            extra_headers=extra_headers, max_retries=max_retries)
+    elif kind == "local_st":
+        # 本地离线向量模型（sentence-transformers）：base_url 存模型标识（如 BAAI/bge-small-zh-v1.5），
+        # 模型文件由 app.providers.local_embed 负责下载/缓存，此处只做实例化
+        from app.providers.drivers.local_st import LocalSTDriver
+
+        drv = LocalSTDriver(model_id=base_url or "", device="cpu")
     elif kind == "local_bge":
+        # 已被 local_st 取代；保留仅为兼容既有配置（FlagEmbedding 依赖很重，不再推荐）
         from app.providers.drivers.local_bge import LocalBGEDriver
 
         drv = LocalBGEDriver(model_path=base_url, device="cpu")

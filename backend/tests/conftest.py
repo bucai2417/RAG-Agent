@@ -23,6 +23,8 @@ os.environ["STORAGE_LOCAL_DIR"] = str(BACKEND_DIR / "data" / "test_files")
 os.environ["SKILL_PACK_DIR"] = str(BACKEND_DIR / "data" / "test_skills")
 # 独立组件目录：否则可选组件安装测试会把浏览器包解压进真实 data/components
 os.environ["COMPONENT_DIR"] = str(BACKEND_DIR / "data" / "test_components")
+# 独立模型目录：否则本地向量模型的缓存/导入测试会写进真实 data/models
+os.environ["MODEL_DIR"] = str(BACKEND_DIR / "data" / "test_models")
 os.environ["EMBEDDING_DIM"] = "64"
 os.environ["TASK_BACKEND"] = "memory"
 

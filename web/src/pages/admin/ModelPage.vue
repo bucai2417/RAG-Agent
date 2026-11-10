@@ -11,6 +11,150 @@
         <el-radio-button value="config">模型配置（{{ configs.length }}）</el-radio-button>
       </el-radio-group>
 
+      <!-- 本地离线向量模型（sentence-transformers） -->
+      <div v-if="tab === 'provider'" class="local-card">
+        <div class="lc-head">
+          <div class="lc-title-row">
+            <span class="lc-title">本地离线向量模型</span>
+            <el-tag v-if="localStatus" size="small" :type="localStatus.installed ? 'success' : 'warning'">
+              {{ localStatus.installed ? '依赖已安装' : '依赖未安装' }}
+            </el-tag>
+            <span v-if="localStatus?.dependency?.installed" class="lc-dep-size dim">
+              占用 {{ mb(localStatus.dependency.size) }} MB
+            </span>
+            <el-popconfirm
+              v-if="localStatus?.dependency?.installed"
+              title="卸载依赖后需重新安装才能用本地模型，确定卸载？"
+              width="260"
+              @confirm="uninstallDependency"
+            >
+              <template #reference>
+                <el-button link size="small" type="danger" :disabled="depInstalling">卸载依赖</el-button>
+              </template>
+            </el-popconfirm>
+            <el-button link size="small" :loading="localLoading" @click="loadLocalStatus">刷新</el-button>
+          </div>
+          <p class="lc-desc">
+            使用 sentence-transformers 在本地计算向量，无需联网、无需 API Key。
+            首次使用会下载模型到 <code>{{ localStatus?.cache_dir || 'data/models' }}</code>。
+          </p>
+        </div>
+
+        <el-alert
+          v-if="localStatus && !localStatus.installed"
+          type="warning"
+          :closable="false"
+          show-icon
+          style="margin-bottom: 12px"
+        >
+          <template #title>需要先安装本地推理依赖（torch + sentence-transformers，约 1GB）</template>
+          <div class="dep-row">
+            <el-button
+              type="primary"
+              size="small"
+              :loading="depInstalling"
+              :disabled="depInstalling"
+              @click="installDependency"
+            >{{ depInstalling ? '安装中…' : '一键安装依赖' }}</el-button>
+            <span class="lc-hint dim">
+              装到 <code>{{ localStatus.dependency?.dir || localStatus.runtime_dir }}</code>，
+              不影响系统 Python；耗时约 5~15 分钟（看网速）。
+            </span>
+          </div>
+
+          <!-- 安装进度 + pip 日志 -->
+          <div v-if="depInstalling || depState.phase === 'failed'" class="dep-progress">
+            <div class="dep-step">{{ depState.step || '准备安装…' }}</div>
+            <el-progress :percentage="100" :indeterminate="depInstalling" :stroke-width="8" :show-text="false" />
+            <div v-if="depState.phase === 'failed'" class="lc-error">安装失败：{{ depState.error }}</div>
+            <details v-if="depState.log" class="dep-log" :open="depState.phase === 'failed'">
+              <summary>查看安装日志</summary>
+              <pre>{{ depState.log }}</pre>
+            </details>
+          </div>
+
+          <div v-if="!localStatus.dependency?.python" class="lc-hint warn">
+            当前环境找不到 Python {{ localStatus.dependency?.required_python }} x64 解释器，无法自动安装；
+            请先安装对应版本 Python，或改用「导入本地模型 zip」。
+          </div>
+        </el-alert>
+
+        <div v-if="localStatus" class="lc-list">
+          <div v-for="m in localStatus.models" :key="m.id" class="lc-item">            <div class="lc-main">
+              <div class="lc-name">
+                {{ m.label }}
+                <el-tag v-if="m.cached" size="small" type="success">已缓存</el-tag>
+                <el-tag v-else-if="downloadState[m.id]?.phase === 'downloading'" size="small" type="primary">下载中</el-tag>
+              </div>
+              <div class="lc-meta">
+                <span class="mono">{{ m.id }}</span>
+                <span class="sep">·</span>
+                <span>{{ m.dim ? m.dim + ' 维' : '维度未知' }}</span>
+                <span v-if="m.size" class="sep">·</span>
+                <span v-if="m.size">{{ m.size }}</span>
+              </div>
+              <div class="lc-note">{{ m.note }}</div>
+              <!-- 下载进度 -->
+              <div v-if="downloadState[m.id] && isBusy(m.id)" class="lc-progress">
+                <el-progress
+                  :percentage="progressPct(m.id)"
+                  :status="downloadState[m.id]?.phase === 'failed' ? 'exception' : undefined"
+                  :stroke-width="8"
+                />
+                <span class="lc-bytes">{{ bytesLabel(m.id) }}</span>
+              </div>
+              <div v-else-if="downloadState[m.id]?.phase === 'failed'" class="lc-error">
+                下载失败：{{ downloadState[m.id]?.error }}
+              </div>
+            </div>
+            <div class="lc-ops">
+              <el-button
+                v-if="!m.cached"
+                size="small"
+                :loading="downloadState[m.id]?.phase === 'downloading' || downloadState[m.id]?.phase === 'resolving'"
+                :disabled="!localStatus.installed || busyAny"
+                @click="downloadModel(m.id)"
+              >下载</el-button>
+              <el-popconfirm v-else title="删除该本地模型文件？" @confirm="removeModel(m.id)">
+                <template #reference>
+                  <el-button size="small" danger :disabled="busyAny">删除</el-button>
+                </template>
+              </el-popconfirm>
+              <el-button
+                size="small"
+                type="primary"
+                :disabled="!localStatus.installed || !m.cached || busyAny"
+                @click="createLocalProvider(m)"
+              >添加为向量模型</el-button>
+            </div>
+          </div>
+        </div>
+        <el-empty v-else-if="!localLoading" :description="localError ? `无法获取本地模型状态：${localError}` : '无法获取本地模型状态'" :image-size="60">
+          <el-button size="small" @click="loadLocalStatus">重试</el-button>
+        </el-empty>
+
+        <div class="lc-foot">
+          <el-upload :auto-upload="false" :show-file-list="false" accept=".zip" :on-change="onImportZip">
+            <el-button size="small" plain :loading="importing" :disabled="busyAny">
+              {{ importing ? '导入中…' : '导入本地模型 zip' }}
+            </el-button>
+          </el-upload>
+          <span class="lc-foot-tip dim">
+            完全离线环境：把模型目录（含 config.json 与权重）打包成 zip 上传，或事先拷到
+            <code>{{ localStatus?.cache_dir || 'data/models' }}/manual/</code>
+          </span>
+        </div>
+      </div>
+
+      <!-- 依赖状态还在探测：独立出来，别让整张卡片等到状态回来才渲染 -->
+      <div v-else-if="tab === 'provider'" class="local-card">
+        <div class="lc-title-row">
+          <span class="lc-title">本地离线向量模型</span>
+          <el-tag size="small" type="info">检测中…</el-tag>
+        </div>
+        <p class="lc-desc">正在检查本地推理依赖与已缓存模型，稍候…</p>
+      </div>
+
       <!-- Provider 列表 -->
       <el-table v-if="tab === 'provider'" v-loading="loading" :data="providers" row-key="id">
         <el-table-column label="名称" min-width="160">
@@ -177,6 +321,10 @@
         </el-form-item>
         <el-form-item v-if="cForm.purpose === 'embedding'" label="向量维度">
           <el-input-number v-model="cForm.embedding_dim" :min="0" controls-position="right" />
+          <div class="model-msg dim">
+            本地模型请填真实维度（BGE small 中文 512 / BGE base 中文 768 / MiniLM 384）。
+            换用不同维度的模型后，已有知识库必须「重新处理」文档，否则新旧向量无法比对。
+          </div>
         </el-form-item>
         <el-form-item label="优先级" extra="数字越小越优先">
           <el-input-number v-model="cForm.priority" :min="0" controls-position="right" />
@@ -209,21 +357,22 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Edit, Delete, Refresh } from '@element-plus/icons-vue'
 import PageContainer from '@/components/PageContainer.vue'
-import { providerApiFull, type ModelConfig } from '@/api'
+import { providerApiFull, type LocalEmbedModel, type LocalEmbedStatus, type LocalDownloadProgress, type LocalDependencyProgress, type ModelConfig } from '@/api'
 import { errMsg } from '@/api/http'
 
 // 与后端 providers/registry.py 的驱动分支保持一致；仍允许 allow-create 填自定义
 const KINDS = [
   'openai', 'azure', 'anthropi', 'dashscope', 'deepseek', 'qwen', 'ollama',
-  'local_bge', 'local_hash', 'local_agent', 'custom',
+  'local_st', 'local_bge', 'local_hash', 'local_agent', 'custom',
 ]
 // kind → 接入地址的填写提示（本地驱动用模型路径/标识，不是 URL）
 const KIND_HINT: Record<string, string> = {
-  local_bge: '本地 bge 模型目录路径，如 D:/models/bge-m3',
+  local_st: '本地向量模型标识，如 BAAI/bge-small-zh-v1.5（无需 URL，模型在上方面板下载）',
+  local_bge: '已由 local_st 取代：本地 bge 模型目录路径',
   local_hash: '离线自测（无需网络），填 local 即可',
   local_agent: '本地 Agent 桥接地址',
 }
@@ -406,7 +555,228 @@ async function setDefault(row: ModelConfig) {
   try { await providerApiFull.updateConfig(row.id, { is_default: true }); ElMessage.success('已设为默认'); load() } catch (e) { ElMessage.error(errMsg(e)) }
 }
 
-onMounted(load)
+// ---------------- 本地离线向量模型 ----------------
+const localStatus = ref<LocalEmbedStatus | null>(null)
+const localLoading = ref(false)
+/** 状态拉取失败原因（卡片已渲染、只是拿不到数据时展示，并给重试） */
+const localError = ref('')
+const importing = ref(false)
+/** 依赖安装进度（只在安装/失败时有内容） */
+const depState = reactive<LocalDependencyProgress>({ phase: 'idle', step: '', log: '', error: null })
+const depInstalling = computed(() => depState.phase === 'running')
+let depTimer: ReturnType<typeof setInterval> | null = null
+/** model_id → 最近一次进度快照（只有正在下载的才有值） */
+const downloadState = reactive<Record<string, LocalDownloadProgress>>({})
+let pollTimer: ReturnType<typeof setInterval> | null = null
+let pollingModelId = ''
+
+const busyAny = computed(() => Object.values(downloadState).some((p) => isBusyPhase(p?.phase)))
+
+function isBusyPhase(p?: string) {
+  return p === 'resolving' || p === 'downloading' || p === 'verifying'
+}
+function isBusy(modelId: string) {
+  return isBusyPhase(downloadState[modelId]?.phase)
+}
+function progressPct(modelId: string) {
+  const st = downloadState[modelId]
+  if (!st) return 0
+  if (st.phase === 'done') return 100
+  if (!st.total) return st.phase === 'resolving' ? 0 : 1
+  return Math.min(99, Math.floor((st.received / st.total) * 100))
+}
+function mb(n?: number | null) {
+  return ((n || 0) / 1024 / 1024).toFixed(1)
+}
+function bytesLabel(modelId: string) {
+  const st = downloadState[modelId]
+  if (!st) return ''
+  return `${mb(st.received)} / ${st.total ? mb(st.total) + ' MB' : '大小未知'}`
+}
+
+async function loadLocalStatus() {
+  localLoading.value = true
+  localError.value = ''
+  try {
+    localStatus.value = await providerApiFull.localStatus()
+    // 后端可能重启过、进度已归零：把还没跑完的进度清掉，避免一直显示「下载中」
+    for (const m of localStatus.value.models || []) {
+      const p = m.progress
+      if (p && isBusyPhase(p.phase)) downloadState[m.id] = p
+      else if (downloadState[m.id] && !isBusy(m.id) && downloadState[m.id].phase !== 'failed') delete downloadState[m.id]
+    }
+    // 依赖安装进度：页面刷新后也能接上（后端仍在跑）
+    const dp = localStatus.value.dependency?.progress
+    if (dp && (dp.phase === 'running' || dp.phase === 'failed')) {
+      Object.assign(depState, dp)
+      if (dp.phase === 'running') startDepPolling()
+    }
+  } catch (e) {
+    // 拿不到状态不能把页面留成空白：卡片会切到「无法获取」并给出重试入口
+    localStatus.value = null
+    localError.value = errMsg(e)
+  } finally {
+    localLoading.value = false
+  }
+}
+
+// ---------------- 依赖一键安装 / 卸载 ----------------
+function stopDepPolling() {
+  if (depTimer) { clearInterval(depTimer); depTimer = null }
+}
+
+function startDepPolling() {
+  if (depTimer) return
+  depTimer = setInterval(async () => {
+    try {
+      const p = await providerApiFull.localDependencyProgress()
+      Object.assign(depState, p)
+      if (p.phase === 'running') return
+      stopDepPolling()
+      if (p.phase === 'done') ElMessage.success(p.step || '依赖安装完成')
+      else if (p.phase === 'failed') ElMessage.error('依赖安装失败，详情见下方日志')
+      await loadLocalStatus()
+    } catch {
+      // 网络抖动：下一轮再试
+    }
+  }, 1500)
+}
+
+async function installDependency() {
+  Object.assign(depState, { phase: 'running', step: '准备安装…', log: '', error: null })
+  try {
+    const r = await providerApiFull.installLocalDependency()
+    if (r.started) { startDepPolling(); return }
+    depState.phase = 'idle'
+    if (r.already_installed || /已安装/.test(r.reason || '')) {
+      ElMessage.info(r.reason || '依赖已安装')
+      await loadLocalStatus()
+      return
+    }
+    depState.phase = 'failed'
+    depState.error = r.reason || '无法开始安装'
+    ElMessage.warning(r.reason || '无法开始安装')
+  } catch (e) {
+    depState.phase = 'failed'
+    depState.error = errMsg(e)
+    ElMessage.error(errMsg(e))
+  }
+}
+
+async function uninstallDependency() {
+  try {
+    const r = await providerApiFull.uninstallLocalDependency()
+    if (r.ok) ElMessage.success(r.message || '依赖已卸载')
+    else ElMessage.warning(r.reason || '卸载未完成')
+    Object.assign(depState, { phase: 'idle', step: '', log: '', error: null })
+    await loadLocalStatus()
+  } catch (e) { ElMessage.error(errMsg(e)) }
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+  pollingModelId = ''
+}
+
+function startPolling(modelId: string) {
+  stopPolling()
+  pollingModelId = modelId
+  pollTimer = setInterval(async () => {
+    try {
+      const p = await providerApiFull.localProgress(modelId)
+      downloadState[modelId] = p
+      if (p.phase === 'done' || p.phase === 'failed') {
+        stopPolling()
+        if (p.phase === 'done') ElMessage.success('模型下载完成')
+        else ElMessage.error(`下载失败：${p.error || '未知错误'}`)
+        await loadLocalStatus()
+      }
+    } catch {
+      // 轮询失败不打断用户操作，等下一轮
+    }
+  }, 1000)
+}
+
+async function downloadModel(modelId: string) {
+  downloadState[modelId] = { phase: 'resolving', received: 0, total: 0, error: null }
+  try {
+    const r = await providerApiFull.downloadLocal(modelId)
+    if (r.started) {
+      startPolling(modelId)
+      return
+    }
+    delete downloadState[modelId]
+    if (r.reason) {
+      // 「已下载」不是错误，其余才是
+      const done = /已下载/.test(r.reason)
+      done ? ElMessage.info(r.reason) : ElMessage.warning(r.reason)
+      if (r.install_hint) ElMessage.info({ message: r.install_hint, duration: 8000 })
+      await loadLocalStatus()
+    }
+  } catch (e) {
+    delete downloadState[modelId]
+    ElMessage.error(errMsg(e))
+  }
+}
+
+async function removeModel(modelId: string) {
+  try {
+    await providerApiFull.removeLocal(modelId)
+    ElMessage.success('已删除')
+    await loadLocalStatus()
+  } catch (e) { ElMessage.error(errMsg(e)) }
+}
+
+async function onImportZip(file: { raw?: File }) {
+  const f = file?.raw
+  if (!f) return
+  importing.value = true
+  try {
+    const r = await providerApiFull.importLocal(f)
+    ElMessage.success(`已导入「${r.model_id}」${r.dim ? `（${r.dim} 维）` : ''}`)
+    await loadLocalStatus()
+  } catch (e) { ElMessage.error(errMsg(e)) } finally { importing.value = false }
+}
+
+/**
+ * 一次把「Provider + embedding 模型配置」建好，用户点一下就能用。
+ * 已存在同标识的 local_st Provider 时只补模型配置，避免重复建。
+ */
+async function createLocalProvider(m: LocalEmbedModel) {
+  try {
+    let p = providers.value.find((x) => x.kind === 'local_st' && x.base_url === m.id)
+    if (!p) {
+      p = await providerApiFull.create({
+        name: `本地 ${m.label || m.id}`,
+        kind: 'local_st',
+        base_url: m.id,
+        timeout: 120,
+      })
+    }
+    const exists = configs.value.some((c) => c.provider_id === p.id && c.model_name === m.id && c.purpose === 'embedding')
+    if (!exists) {
+      const hasDefault = configs.value.some((c) => c.purpose === 'embedding' && c.is_default)
+      await providerApiFull.createConfig({
+        provider_id: p.id,
+        purpose: 'embedding',
+        model_name: m.id,
+        display_name: m.label || m.id,
+        embedding_dim: m.dim || 0,
+        is_default: !hasDefault,
+        priority: 50,
+      })
+    }
+    ElMessage.success(exists ? '该模型已在向量模型列表中' : `已添加为向量模型：${m.label || m.id}`)
+    await load()
+    await loadLocalStatus()
+  } catch (e) { ElMessage.error(errMsg(e)) }
+}
+
+onMounted(() => {
+  load()
+  loadLocalStatus()
+})
+onBeforeUnmount(() => { stopPolling(); stopDepPolling() })
 </script>
 
 <style scoped>
@@ -417,4 +787,66 @@ onMounted(load)
 .model-pick { display: flex; gap: 8px; width: 100%; align-items: center; }
 .model-msg { font-size: 12px; color: var(--text-muted); margin-top: 4px; line-height: 1.5; }
 .model-msg.dim { opacity: 0.85; }
+
+/* 本地离线向量模型卡片 */
+.local-card {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  background: var(--el-fill-color-blank);
+}
+.lc-head { margin-bottom: 12px; }
+.lc-title-row { display: flex; align-items: center; gap: 10px; }
+.lc-title { font-weight: 600; font-size: 14px; }
+.lc-desc { margin: 6px 0 0; font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
+.lc-desc code, .lc-foot-tip code { font-family: monospace; font-size: 11px; }
+.lc-hint { font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; }
+.lc-hint.dim, .lc-foot-tip.dim { color: var(--text-muted); }
+.lc-hint.warn { margin-top: 8px; color: var(--el-color-warning); }
+.lc-dep-size { font-size: 12px; }
+
+/* 依赖安装：按钮行 / 进度 / pip 日志 */
+.dep-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
+.dep-progress { margin-top: 10px; }
+.dep-step { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+.dep-log { margin-top: 8px; }
+.dep-log summary { font-size: 12px; color: var(--text-secondary); cursor: pointer; }
+.dep-log pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--el-fill-color-lighter);
+  border-radius: 4px;
+  color: var(--text-secondary);
+}
+
+.lc-list { display: flex; flex-direction: column; gap: 10px; }
+.lc-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--el-fill-color-lighter);
+}
+.lc-main { min-width: 0; flex: 1; }
+.lc-name { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; }
+.lc-meta { margin-top: 4px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); }
+.lc-meta .sep { opacity: 0.5; }
+.lc-note { margin-top: 2px; font-size: 12px; color: var(--text-muted); }
+.lc-progress { margin-top: 8px; display: flex; align-items: center; gap: 10px; }
+.lc-progress :deep(.el-progress) { flex: 1; }
+.lc-bytes { font-size: 11px; color: var(--text-muted); white-space: nowrap; font-family: monospace; }
+.lc-error { margin-top: 6px; font-size: 12px; color: var(--el-color-danger); word-break: break-all; }
+.lc-ops { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+.lc-foot { margin-top: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.lc-foot-tip { font-size: 12px; line-height: 1.6; }
 </style>

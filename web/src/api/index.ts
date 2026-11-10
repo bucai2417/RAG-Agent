@@ -1241,6 +1241,64 @@ export const retrievalApi = {
 
 // ---------------- Provider / 模型管理 ----------------
 
+/** 本地离线向量模型：推荐清单里的一条（含本地缓存状态） */
+export interface LocalEmbedModel {
+  id: string
+  label: string
+  dim: number
+  size: string
+  note: string
+  cached: boolean
+  path?: string | null
+  source?: 'hf' | 'manual' | null
+  progress?: LocalDownloadProgress
+}
+
+export interface LocalDownloadProgress {
+  phase: 'idle' | 'resolving' | 'downloading' | 'verifying' | 'done' | 'failed'
+  received: number
+  total: number
+  error: string | null
+  path?: string | null
+}
+
+export interface LocalDependencyProgress {
+  phase: 'idle' | 'running' | 'done' | 'failed'
+  step: string
+  log: string
+  error: string | null
+  updated_at?: number | null
+  target?: string | null
+  python?: string | null
+}
+
+/** runtime 可选依赖（torch + sentence-transformers）状态 */
+export interface LocalDependencyStatus {
+  dir: string
+  installed: boolean
+  size: number
+  busy: boolean
+  frozen: boolean
+  python: string | null
+  required_python: string
+  packages: string[]
+  index: string
+  progress: LocalDependencyProgress
+}
+
+export interface LocalEmbedStatus {
+  installed: boolean
+  torch: boolean
+  version: string
+  error: string
+  cache_dir: string
+  runtime_dir: string
+  models: LocalEmbedModel[]
+  install_hint: string
+  mirror: string
+  dependency?: LocalDependencyStatus
+}
+
 export const providerApiFull = {
   list: () => http.get<any[]>('/providers').then((r) => r.data),
   create: (data: any) => http.post('/providers', data).then((r) => r.data),
@@ -1253,6 +1311,35 @@ export const providerApiFull = {
   createConfig: (data: any) => http.post<ModelConfig>('/providers/configs', data).then((r) => r.data),
   updateConfig: (id: number, data: any) => http.patch<ModelConfig>(`/providers/configs/${id}`, data).then((r) => r.data),
   removeConfig: (id: number) => http.delete(`/providers/configs/${id}`).then((r) => r.data),
+  // ---- 本地离线向量模型（sentence-transformers）----
+  localStatus: () => http.get<LocalEmbedStatus>('/providers/local/status').then((r) => r.data),
+  localProgress: (modelId: string) =>
+    http.get<LocalDownloadProgress>('/providers/local/progress', { params: { model_id: modelId } }).then((r) => r.data),
+  downloadLocal: (modelId: string, source = 'hf') =>
+    http.post<{ started: boolean; reason?: string; install_hint?: string }>('/providers/local/download', { model_id: modelId, source }).then((r) => r.data),
+  removeLocal: (modelId: string) =>
+    http.delete(`/providers/local/models/${encodeURIComponent(modelId)}`).then((r) => r.data),
+  importLocal: (file: File, name?: string) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return http.post<{ ok: boolean; model_id: string; path: string; dim: number }>(
+      '/providers/local/import',
+      fd,
+      { params: name ? { name } : undefined },
+    ).then((r) => r.data)
+  },
+  // ---- 本地推理依赖一键安装 / 卸载 ----
+  localDependency: () => http.get<LocalDependencyStatus>('/providers/local/dependency').then((r) => r.data),
+  localDependencyProgress: () =>
+    http.get<LocalDependencyProgress>('/providers/local/dependency/progress').then((r) => r.data),
+  installLocalDependency: () =>
+    http.post<{ started: boolean; reason?: string; already_installed?: boolean; need_python?: boolean; python?: string }>(
+      '/providers/local/dependency/install',
+    ).then((r) => r.data),
+  uninstallLocalDependency: () =>
+    http.delete<{ ok: boolean; message?: string; reason?: string; pending_cleanup?: string | null }>(
+      '/providers/local/dependency',
+    ).then((r) => r.data),
 }
 
 // ---------------- 待办 / 日程 / 提醒 ----------------

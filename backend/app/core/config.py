@@ -220,6 +220,10 @@ class Settings(BaseSettings):
     skill_pack_dir: str = str(DATA_DIR / "skills")
     # 可选组件安装目录（浏览器运行时等由用户点按安装的二进制）
     component_dir: str = str(DATA_DIR / "components")
+    # 本地离线向量模型缓存目录（sentence-transformers 的 HF 缓存 + 手动导入的模型）
+    # 结构：<model_dir>/hub/…（hf_hub 缓存）、<model_dir>/manual/…（用户上传的 zip）、
+    #       <model_dir>/runtime/…（桌面版按需 pip --target 安装的可选依赖）
+    model_dir: str = str(DATA_DIR / "models")
     # 运行日志落盘（轮转）；空字符串=只输出到 stdout
     log_file: str = str(DATA_DIR / "logs" / "app.log")
     log_max_bytes: int = 10 * 1024 * 1024
@@ -299,6 +303,12 @@ class Settings(BaseSettings):
     @property
     def component_path(self) -> Path:
         p = Path(self.component_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    @property
+    def model_path(self) -> Path:
+        p = Path(self.model_dir)
         p.mkdir(parents=True, exist_ok=True)
         return p
 

@@ -801,7 +801,7 @@ const auth = useAuthStore()
 const kb = ref<KB | null>(null)
 const loading = ref(false)
 const activeTab = ref('docs')
-const embModels = ref<{ id: number; display_name: string }[]>([])
+const embModels = ref<{ id: number; display_name: string; embedding_dim?: number | null }[]>([])
 
 const docs = ref<Doc[]>([])
 const folders = ref<{ id: number; name: string; parent_id: number | null }[]>([])
@@ -1010,7 +1010,9 @@ function pieOption(data: Record<string, number>, nameMap?: Record<string, string
 async function loadEmbModels() {
   try {
     const cfgs = await providerApi.configs()
-    embModels.value = cfgs.filter((c) => c.purpose === 'embedding').map((c) => ({ id: c.id, display_name: c.display_name }))
+    embModels.value = cfgs
+      .filter((c) => c.purpose === 'embedding')
+      .map((c) => ({ id: c.id, display_name: c.display_name, embedding_dim: c.embedding_dim }))
   } catch { /* 无权或未配置 */ }
 }
 async function loadConnector() {
@@ -1087,6 +1089,24 @@ async function saveKb() {
   } catch (e) { ElMessage.error(errMsg(e)) } finally { kbSaving.value = false }
 }
 async function setKbEmbedding(modelId: number | null) {
+  // 换模型前先确认：向量维度不同的模型混用，旧向量与新查询向量无法比对，
+  // 检索会返回「向量维度不一致」。库里已有分块时必须让用户知道代价。
+  if (modelId && (kb.value?.chunk_count ?? 0) > 0) {
+    const target = embModels.value.find((m) => m.id === modelId)
+    const newDim = target?.embedding_dim || 0
+    const oldDim = (kb.value as any)?.embedding_dim || 0
+    const dimNote = newDim && oldDim && newDim !== oldDim
+      ? `新模型为 ${newDim} 维，本库现有向量为 ${oldDim} 维，两者无法比对。\n`
+      : ''
+    try {
+      await ElMessageBox.confirm(
+        `${dimNote}切换后需要「重新处理」全部文档（共 ${kb.value?.chunk_count} 个分块）才会用新模型重新向量化，`
+        + '在此之前该库只能靠关键词检索。现在切换？',
+        '切换向量模型',
+        { type: 'warning', confirmButtonText: '切换', cancelButtonText: '取消' },
+      )
+    } catch { return }
+  }
   try {
     kb.value = await kbApi.update(kbId, { embedding_model_id: modelId, row_version: kb.value?.row_version })
     ElMessage.success(modelId ? '已切换向量模型，旧文档需「重新处理」才会用新模型重嵌入' : '已恢复默认向量模型')

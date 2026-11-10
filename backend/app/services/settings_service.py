@@ -169,6 +169,9 @@ FIELD_META: dict[str, dict[str, Any]] = {
     "storage_backend": {"label": "存储后端", "group": "storage", "kind": "str", "restart": True},
     "storage_local_dir": {"label": "本地存储目录", "group": "storage", "kind": "str", "restart": True},
     "skill_pack_dir": {"label": "技能包目录", "group": "storage", "kind": "str", "restart": True},
+    "model_dir": {"label": "本地向量模型目录", "group": "storage", "kind": "str", "restart": True,
+                  "help": "下载的离线向量模型（sentence-transformers）缓存位置；"
+                          "改动后已下载的模型不会自动搬过去，需重新下载或手动拷贝"},
     # ---- 默认模型 ----
     "default_llm_base_url": {"label": "默认对话 Base URL", "group": "provider", "kind": "str"},
     "default_llm_api_key": {"label": "默认对话 API Key", "group": "provider", "kind": "secret"},
